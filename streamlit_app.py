@@ -34,9 +34,12 @@ def mock_elasticsearch_search(user_query):
 
 # --- THE LLM PROMPT TEMPLATE ---
 rag_prompt = PromptTemplate.from_template("""
-You are a helpful podcast assistant. Answer the user's question using ONLY the provided podcast transcripts. 
-If the answer is not in the transcripts, say "I cannot find the answer in the current podcast database."
-Always cite the podcast ID and timestamps you used to form your answer.
+You are a helpful podcast assistant. Answer the user's question by synthesizing ALL relevant information from the provided podcast transcripts. 
+
+CRITICAL INSTRUCTIONS:
+1. Use ONLY the provided transcripts.
+2. If the transcripts do not contain the answer, say "I cannot find the answer in the current podcast database."
+3. You MUST cite EVERY podcast ID and timestamp that contributed to your answer. If multiple podcasts discuss the topic, you must include information from all of them.
 
 User Question: {question}
 
