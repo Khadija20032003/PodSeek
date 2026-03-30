@@ -4,6 +4,12 @@ This repo contains the frontend and LLM connection for our Podcast Search projec
 
 ## Quick Start Guide
 
+### Create the virtual environment
+```bash 
+python3 -m venv venv
+source venv/bin/activate
+```
+
 ### Install Dependencies
 Install all required Python libraries from the instruction manual:
 
@@ -18,15 +24,18 @@ We are using Groq to access the open-source Llama 3 model. You need your own API
 
 - Go to the API Keys tab and generate a new key.
 
-#### IMPORTANT: Before generating a key, go to the Playground tab on the left. Select the llama-3.1-8b-instant model and interact with it. My API key got activated after I did this.
+#### IMPORTANT: After generating your key, go to the Playground tab on the left. Select the llama-3.1-8b-instant model and interact with it. My API key got activated after I did this.
 
-- In the root of the project folder, find the file named .env.example
+- In the root of the project folder, create the file named .env
 
-- Paste your key and change the file's name to .env
+- Paste your key in the file like so:
 
+```bash
+GROQ_API_KEY=your_key_here
+```
 
 ### Run the Application
 
 ```bash
-streamlit run app.py
+streamlit run streamlit_app.py
 ```
