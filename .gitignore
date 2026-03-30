@@ -1,4 +1,25 @@
+# --- IMPORTANT ---
+# Prevents your private GROQ_API_KEY from being uploaded.
+.env
+# --- NEVER DELETE THIS ---
 
 *.zip
 /data/cleaned_output/**
 /data/podcasts-no-audio-13GB/**
+.venv
+env/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+.streamlit/config.toml
+.streamlit/secrets.toml
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.iml
+target/
+bin/
