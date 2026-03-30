@@ -2,3 +2,4 @@
 *.zip
 /data/cleaned_output/**
 /data/podcasts-no-audio-13GB/**
+.venv/*
