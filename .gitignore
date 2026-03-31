@@ -2,3 +2,8 @@
 *.zip
 /data/cleaned_output/**
 /data/podcasts-no-audio-13GB/**
+/cleaned_output/**
+/chunked_podcast_segments/
+/enriched_metadata/
+/podcasts-no-audio-13GB/**
+/cleaned)output/**
