@@ -2,3 +2,10 @@
 *.zip
 /data/cleaned_output/**
 /data/podcasts-no-audio-13GB/**
+.venv/*
+/data/__pycache__/*
+/data/cleaned_output/*
+/data/cleaned_full_podcast_transcript/*
+/data/cleaned_podcast_segments/*
+/data/chunked_podcast_segments/*
+/data/enriched_metadata/*
