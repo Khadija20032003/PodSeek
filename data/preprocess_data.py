@@ -6,8 +6,8 @@ INPUT_DIR = r"C:\Users\helpf\Desktop\DD2477 Project\podcasts-no-audio-13GB"
 OUTPUT_FILE = r"C:\Users\helpf\Desktop\DD2477 Project\cleaned_output\cleaned_data.jsonl"
 
 def clean_podcast_directory(input_folder, output_filepath):
-    print(f"🚀 Starting cleanup of '{input_folder}'...")
-    print(f"📁 Saving pure RAG data to '{output_filepath}'...\n")
+    print(f"Starting cleanup of '{input_folder}'...")
+    print(f"Saving pure RAG data to '{output_filepath}'...\n")
     
     files_processed = 0
     chunks_saved = 0
