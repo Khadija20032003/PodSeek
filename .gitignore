@@ -1,11 +1,18 @@
-
 *.zip
-/data/cleaned_output/**
-/data/podcasts-no-audio-13GB/**
-.venv/*
-/data/__pycache__/*
-/data/cleaned_output/*
-/data/cleaned_full_podcast_transcript/*
-/data/cleaned_podcast_segments/*
-/data/chunked_podcast_segments/*
-/data/enriched_metadata/*
+.venv/
+__pycache__/
+
+# Data pipeline outputs
+/data/podcasts-no-audio-13GB/
+/data/cleaned_output/
+/data/cleaned_full_podcast_transcript/
+/data/cleaned_podcast_segments/
+/data/chunked_podcast_segments/
+/data/enriched_metadata/
+
+# Root-level duplicates (delete these)
+/cleaned_output/
+/enriched_metadata/
+
+# Embeddings (too large for git)
+elastic_ready_with_embeddings.jsonl

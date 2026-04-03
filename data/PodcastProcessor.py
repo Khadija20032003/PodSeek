@@ -1,11 +1,21 @@
+"""
+PodcastProcessor.py — Creates full transcripts and segment files per episode.
+
+Reads the grouped JSONL (one line per episode with segments array) and produces:
+  - One .txt transcript per episode
+  - One .json segment file per episode
+"""
+
+import sys
 import json
 import logging
 from pathlib import Path
 from typing import Dict, Any
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import GROUPED_DATA_FILE, TRANSCRIPT_DIR, SEGMENTS_DIR
 
-## Creates a whole transcript of one episode
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 class PodcastProcessor:
@@ -14,16 +24,14 @@ class PodcastProcessor:
     from a JSONL file.
     """
 
-    def __init__(self, input_file: str, transcript_dir: str, segments_dir: str):
-        self.input_file = Path(input_file)
-        self.transcript_dir = Path(transcript_dir)
-        self.segments_dir = Path(segments_dir)
+    def __init__(self, input_file: Path, transcript_dir: Path, segments_dir: Path):
+        self.input_file = input_file
+        self.transcript_dir = transcript_dir
+        self.segments_dir = segments_dir
         self._setup_directories()
 
     def _setup_directories(self) -> None:
         """Checks if directories exist; if not, creates them."""
-        # exist_ok=True prevents errors if the folder is already there
-        # parents=True creates any necessary parent folders
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
         self.segments_dir.mkdir(parents=True, exist_ok=True)
         logging.info("Output directories verified/created.")
@@ -77,11 +85,10 @@ class PodcastProcessor:
                 json.dump(data, f, indent=4)
 
 
-# --- Usage Example ---
 if __name__ == "__main__":
     processor = PodcastProcessor(
-        input_file="./cleaned_output/extracted_podcasts.jsonl",
-        transcript_dir="./cleaned_full_podcast_transcript",
-        segments_dir="./cleaned_podcast_segments",
+        input_file=GROUPED_DATA_FILE,
+        transcript_dir=TRANSCRIPT_DIR,
+        segments_dir=SEGMENTS_DIR,
     )
     processor.process_file()

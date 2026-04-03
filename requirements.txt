@@ -3,3 +3,5 @@ pandas
 feedparser
 beautifulsoup4
 requests
+elasticsearch
+pydantic

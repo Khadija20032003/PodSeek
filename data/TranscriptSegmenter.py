@@ -1,7 +1,18 @@
+"""
+TranscriptSegmenter.py — Chunks podcast segments with a sliding window strategy.
+
+Merges small speech-to-text segments into ~120-second chunks with 30-second overlap,
+assigning global and local IDs to each chunk.
+"""
+
+import sys
 import json
 import logging
 from pathlib import Path
 from typing import Dict, Any, List
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import GROUPED_DATA_FILE, CHUNKED_DIR, TARGET_CHUNK_SECONDS, OVERLAP_SECONDS
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -14,13 +25,13 @@ class TranscriptSegmenter:
 
     def __init__(
         self,
-        input_file: str,
-        output_dir: str,
-        target_chunk_seconds: int = 120,
-        overlap_seconds: int = 30,
+        input_file: Path,
+        output_dir: Path,
+        target_chunk_seconds: int = TARGET_CHUNK_SECONDS,
+        overlap_seconds: int = OVERLAP_SECONDS,
     ):
-        self.input_file = Path(input_file)
-        self.output_dir = Path(output_dir)
+        self.input_file = input_file
+        self.output_dir = output_dir
         self.target_chunk_seconds = target_chunk_seconds
         self.overlap_seconds = overlap_seconds
         self.global_segment_id = 1
@@ -95,7 +106,6 @@ class TranscriptSegmenter:
 
             current_duration = current_end_time - current_start_time
 
-            # If we reached our target chunk size (e.g., 120 seconds)
             if current_duration >= self.target_chunk_seconds:
                 chunks.append(
                     {
@@ -110,11 +120,9 @@ class TranscriptSegmenter:
                 self.global_segment_id += 1
                 local_chunk_id += 1
 
-                # --- The Overlap Logic ---
                 overlap_start_target = current_end_time - self.overlap_seconds
                 current_chunk_text = []
 
-                # Backtrack to find the segment where the overlap should start
                 for j in range(i, -1, -1):
                     if raw_segments[j]["start"] <= overlap_start_target:
                         current_start_time = raw_segments[j]["start"]
@@ -137,14 +145,10 @@ class TranscriptSegmenter:
         return chunks
 
 
-# --- Usage Example ---
 if __name__ == "__main__":
     chunker = TranscriptSegmenter(
-        input_file="./cleaned_output/extracted_podcasts.jsonl",
-        output_dir="./chunked_podcast_segments",
-        target_chunk_seconds=120,
-        overlap_seconds=30,
+        input_file=GROUPED_DATA_FILE,
+        output_dir=CHUNKED_DIR,
     )
-
     chunker.process_file()
     print("Chunking complete! Check the output directory.")
