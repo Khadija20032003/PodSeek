@@ -93,7 +93,7 @@ class RSSEnrichmentPipeline:
                     failed += 1
                     # logging.error(f"Failed: {rss_url} — {e}")
 
-                if completed % 1000 == 0:
+                if completed % 5000 == 0:
                     logging.info(
                         f"  Progress: {completed}/{total} feeds ({failed} failed)"
                     )
