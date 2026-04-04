@@ -33,7 +33,9 @@ class RSSEnrichmentPipeline:
     Uses ThreadPoolExecutor to fetch multiple feeds concurrently.
     """
 
-    def __init__(self, tsv_path: Path, output_dir: Path, max_workers: int = MAX_WORKERS_NETWORK):
+    def __init__(
+        self, tsv_path: Path, output_dir: Path, max_workers: int = MAX_WORKERS_NETWORK
+    ):
         self.tsv_path = tsv_path
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -41,7 +43,9 @@ class RSSEnrichmentPipeline:
 
         self.session = requests.Session()
         self.session.headers.update(
-            {"User-Agent": "Mozilla/5.0 (Podcast Research Project; contact@example.com)"}
+            {
+                "User-Agent": "Mozilla/5.0 (Podcast Research Project; contact@example.com)"
+            }
         )
 
     def _clean_html(self, raw_html: str) -> str:
@@ -73,7 +77,9 @@ class RSSEnrichmentPipeline:
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
-                executor.submit(self._process_single_show, rss_url, episodes_df): rss_url
+                executor.submit(
+                    self._process_single_show, rss_url, episodes_df
+                ): rss_url
                 for rss_url, episodes_df in tasks
             }
 
@@ -85,12 +91,11 @@ class RSSEnrichmentPipeline:
                     future.result()
                 except Exception as e:
                     failed += 1
-                    logging.error(f"Failed: {rss_url} — {e}")
+                    # logging.error(f"Failed: {rss_url} — {e}")
 
-                if completed % 100 == 0:
+                if completed % 1000 == 0:
                     logging.info(
-                        f"  Progress: {completed}/{total} feeds "
-                        f"({failed} failed)"
+                        f"  Progress: {completed}/{total} feeds ({failed} failed)"
                     )
 
         logging.info(f"\nDONE! Processed {completed} feeds ({failed} failed)")
