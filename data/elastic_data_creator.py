@@ -110,13 +110,19 @@ class ElasticDatasetBuilder:
 
                 for segment in segments:
                     # Construct flat Elasticsearch document
+                    chunk_id = segment.get("chunk_id")
+                    parent_id = segment.get("parent_id")
                     elastic_doc = {
-                        "elastic_id": f"{file_id}_{segment.get('segment_id')}",
+                        "elastic_id": chunk_id if chunk_id else f"{file_id}_{segment.get('segment_id')}",
                         "file_id": file_id,
-                        "segment_id": segment.get("segment_id"),
+                        "chunk_id": chunk_id,
                         "text": segment.get("text", "").strip(),
-                        "start_time": segment.get("start"),
-                        "end_time": segment.get("end"),
+                        "start_time": segment.get("start_time", segment.get("start")),
+                        "end_time": segment.get("end_time", segment.get("end")),
+                        "parent_id": parent_id,
+                        "parent_text": segment.get("parent_text", "").strip(),
+                        "parent_start_time": segment.get("parent_start_time"),
+                        "parent_end_time": segment.get("parent_end_time"),
                         "show_name": base_meta.get("show_name", "Unknown Show"),
                         "episode_name": base_meta.get(
                             "episode_name", "Unknown Episode"

@@ -40,6 +40,12 @@ ENRICHED_META_DIR = PREPROCESSING_FILES / "enriched_metadata"
 TARGET_CHUNK_SECONDS = 120
 OVERLAP_SECONDS = 30
 
+# Hierarchical chunking (Parent/Child) for RAG
+# - Parent chunks: larger context returned to the LLM
+# - Child chunks: smaller units embedded and searched in Elasticsearch
+PARENT_CHUNK_SIZE_SECONDS = 120
+CHILD_CHUNK_SIZE_SECONDS = 30
+
 # --- MULTIPROCESSING ---
 MAX_WORKERS_CPU = 8  # for preprocess_data.py (CPU-bound)
 MAX_WORKERS_NETWORK = 20  # for RSSEnrichmentPipeline.py (network-bound)

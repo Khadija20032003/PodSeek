@@ -99,7 +99,9 @@ class EmbeddingGenerator:
 
                 try:
                     chunk = json.loads(line)
-                    batch_texts.append(chunk.get("text", ""))
+                    # Embed only the child chunk's searchable text.
+                    # Parent text is carried for retrieval/LLM context, not for embedding.
+                    batch_texts.append(str(chunk.get("text", "")))
                     batch_chunks.append(chunk)
                 except json.JSONDecodeError:
                     continue

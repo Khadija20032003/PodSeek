@@ -1,40 +1,48 @@
 """
-TranscriptSegmenter.py — Chunks podcast segments with a sliding window strategy.
+TranscriptSegmenter.py — Hierarchical chunking (Parent/Child) for RAG.
 
-Merges small speech-to-text segments into ~120-second chunks with 30-second overlap,
-assigning global and local IDs to each chunk.
+Creates fixed-size parent windows (default 120s), then subdivides each parent into
+fixed-size child windows (default 30s).
+
+The output is a denormalized *flat* list of child chunks that each carry the full
+parent text so downstream steps can embed/search children while returning parents to
+the LLM.
 """
 
 import sys
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import GROUPED_DATA_FILE, CHUNKED_DIR, TARGET_CHUNK_SECONDS, OVERLAP_SECONDS
+from config import (
+    GROUPED_DATA_FILE,
+    CHUNKED_DIR,
+    PARENT_CHUNK_SIZE_SECONDS,
+    CHILD_CHUNK_SIZE_SECONDS,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 class TranscriptSegmenter:
     """
-    Reads raw podcast segments, applies a sliding window chunking strategy,
-    and assigns global and local IDs to the new chunks.
+    Reads raw podcast segments and emits denormalized child chunks that contain
+    parent context fields.
     """
 
     def __init__(
         self,
         input_file: Path,
         output_dir: Path,
-        target_chunk_seconds: int = TARGET_CHUNK_SECONDS,
-        overlap_seconds: int = OVERLAP_SECONDS,
+        parent_chunk_seconds: int = PARENT_CHUNK_SIZE_SECONDS,
+        child_chunk_seconds: int = CHILD_CHUNK_SIZE_SECONDS,
     ):
         self.input_file = input_file
         self.output_dir = output_dir
-        self.target_chunk_seconds = target_chunk_seconds
-        self.overlap_seconds = overlap_seconds
-        self.global_segment_id = 1
+        self.parent_chunk_seconds = parent_chunk_seconds
+        self.child_chunk_seconds = child_chunk_seconds
 
         self._setup_directories()
 
@@ -62,7 +70,10 @@ class TranscriptSegmenter:
                     logging.warning(f"Invalid JSON at line {line_number}. Skipping.")
 
     def _process_single_podcast(self, data: Dict[str, Any]) -> None:
-        """Chunks the segments with a sliding window and saves the result."""
+        """Creates hierarchical chunks (parent/child) and saves the result.
+
+        Output is a *flat list of child chunks*, each containing its parent's text.
+        """
         file_id = str(data.get("file_id", ""))
         clean_file_id = file_id.removesuffix(".json")
 
@@ -75,7 +86,10 @@ class TranscriptSegmenter:
             logging.warning(f"Skipping '{clean_file_id}': No segments found.")
             return
 
-        chunked_segments = self._apply_sliding_window(raw_segments)
+        chunked_segments = self._create_parent_child_chunks(
+            raw_segments=raw_segments,
+            file_id=clean_file_id,
+        )
         output_data = {"file_id": clean_file_id, "segments": chunked_segments}
         output_path = self.output_dir / f"{clean_file_id}_chunked.json"
 
@@ -87,60 +101,125 @@ class TranscriptSegmenter:
             with open(output_path, mode="w", encoding="utf-8") as f:
                 json.dump(output_data, f, indent=4)
 
-    def _apply_sliding_window(
-        self, raw_segments: List[Dict[str, Any]]
+    def _normalize_segment(self, segment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Normalizes a raw segment into a consistent schema.
+
+        Expected input keys are produced by the upstream pipeline.
+        If required fields are missing or invalid, returns None.
+        """
+        try:
+            start = float(segment["start"])
+            end = float(segment["end"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        if end <= start:
+            return None
+
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            return None
+
+        return {"start": start, "end": end, "text": text}
+
+    def _collect_text_in_window(
+        self,
+        segments: List[Dict[str, Any]],
+        window_start: float,
+        window_end: float,
+    ) -> str:
+        """Collects transcript text from segments overlapping [window_start, window_end].
+
+        We use overlap semantics so that child chunks align to time windows even if the
+        upstream ASR segments don't align perfectly to those boundaries.
+        """
+        texts: List[str] = []
+        for seg in segments:
+            if seg["end"] <= window_start:
+                continue
+            if seg["start"] >= window_end:
+                break
+            texts.append(seg["text"])
+        return " ".join(texts).strip()
+
+    def _create_parent_child_chunks(
+        self,
+        raw_segments: List[Dict[str, Any]],
+        file_id: str,
     ) -> List[Dict[str, Any]]:
+        """Hierarchical chunking (Parent -> Child) with a denormalized flat output.
+
+        - Parent windows are fixed-size (default 120s).
+        - Each parent is subdivided into fixed-size child windows (default 30s).
+
+        Output schema (per child chunk) matches the required downstream contract:
+        {
+          "file_id": ..., "chunk_id": ..., "text": ..., "start_time": ..., "end_time": ...,
+          "parent_id": ..., "parent_text": ..., "parent_start_time": ..., "parent_end_time": ...
+        }
         """
-        Merges small segments into larger chunks with overlap,
-        assigning local chunk IDs and global segment IDs.
-        """
-        chunks = []
-        current_chunk_text = []
-        current_start_time = raw_segments[0]["start"]
-        current_end_time = raw_segments[0]["end"]
-        local_chunk_id = 1
 
-        for i, segment in enumerate(raw_segments):
-            current_chunk_text.append(segment["text"])
-            current_end_time = segment["end"]
+        normalized: List[Dict[str, Any]] = []
+        for seg in raw_segments:
+            norm = self._normalize_segment(seg)
+            if norm is not None:
+                normalized.append(norm)
 
-            current_duration = current_end_time - current_start_time
+        if not normalized:
+            return []
 
-            if current_duration >= self.target_chunk_seconds:
-                chunks.append(
-                    {
-                        "segment_id": self.global_segment_id,
-                        "chunk_id": local_chunk_id,
-                        "text": " ".join(current_chunk_text).strip(),
-                        "start": current_start_time,
-                        "end": current_end_time,
-                    }
-                )
+        # Ensure monotonic ordering so we can break early in window scans.
+        normalized.sort(key=lambda s: (s["start"], s["end"]))
 
-                self.global_segment_id += 1
-                local_chunk_id += 1
+        first_start = normalized[0]["start"]
+        last_end = max(s["end"] for s in normalized)
 
-                overlap_start_target = current_end_time - self.overlap_seconds
-                current_chunk_text = []
+        parent_idx = 1
+        chunks: List[Dict[str, Any]] = []
 
-                for j in range(i, -1, -1):
-                    if raw_segments[j]["start"] <= overlap_start_target:
-                        current_start_time = raw_segments[j]["start"]
-                        for k in range(j, i + 1):
-                            current_chunk_text.append(raw_segments[k]["text"])
-                        break
-
-        if current_chunk_text:
-            chunks.append(
-                {
-                    "segment_id": self.global_segment_id,
-                    "chunk_id": local_chunk_id,
-                    "text": " ".join(current_chunk_text).strip(),
-                    "start": current_start_time,
-                    "end": current_end_time,
-                }
+        parent_start = first_start
+        while parent_start < last_end:
+            parent_end = min(
+                parent_start + float(self.parent_chunk_seconds),
+                float(last_end),
             )
-            self.global_segment_id += 1
+            parent_text = self._collect_text_in_window(normalized, parent_start, parent_end)
+
+            # Skip empty parent windows (e.g., gaps in transcript time).
+            if parent_text:
+                parent_id = f"{file_id}_parent{parent_idx}"
+
+                # Child windows are generated inside the parent window.
+                child_idx = 1
+                child_start = parent_start
+                while child_start < parent_end:
+                    child_end = min(child_start + float(self.child_chunk_seconds), parent_end)
+                    child_text = self._collect_text_in_window(
+                        normalized, child_start, child_end
+                    )
+
+                    # Emit only meaningful children.
+                    if child_text:
+                        chunks.append(
+                            {
+                                "file_id": file_id,
+                                "chunk_id": f"{parent_id}_child{child_idx}",
+                                "text": child_text,
+                                "start_time": float(child_start),
+                                "end_time": float(child_end),
+                                "parent_id": parent_id,
+                                "parent_text": parent_text,
+                                "parent_start_time": float(parent_start),
+                                "parent_end_time": float(parent_end),
+                            }
+                        )
+
+                    child_idx += 1
+                    child_start = child_end
+
+                parent_idx += 1
+
+            parent_start = parent_end
 
         return chunks
 

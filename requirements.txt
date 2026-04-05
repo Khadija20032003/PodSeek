@@ -6,3 +6,4 @@ requests
 elasticsearch
 pydantic
 tqdm
+sentence_transformers
