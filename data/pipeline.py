@@ -6,14 +6,15 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
-    RAW_DATASET_DIR,
+    TRANSCRIPTS_JSON_DIR,
     CLEANED_DATA_FILE,
     GROUPED_DATA_FILE,
     TRANSCRIPT_DIR,
     SEGMENTS_DIR,
     CHUNKED_DIR,
-    TARGET_CHUNK_SECONDS,
-    OVERLAP_SECONDS,
+    PARENT_CHUNK_SIZE_SECONDS,
+    CHILD_CHUNK_SIZE_SECONDS,
+    PARENT_OVERLAP_SECONDS,
     TSV_FILE,
     ENRICHED_META_DIR,
     MAX_WORKERS_NETWORK,
@@ -86,7 +87,7 @@ class PipelineBuilder:
 
         def run_step_1():
             extractor = TranscriptExtractor(
-                input_dir=RAW_DATASET_DIR,
+                input_dir=TRANSCRIPTS_JSON_DIR,
                 output_file=CLEANED_DATA_FILE,
                 grouped_file=GROUPED_DATA_FILE,
             )
@@ -119,12 +120,12 @@ class PipelineBuilder:
         self.requested_steps.add(3)
 
         def run_step_3():
-            # Uses TARGET_CHUNK_SECONDS and OVERLAP_SECONDS implicitly based on your class defaults
             segmenter = TranscriptSegmenter(
                 input_file=GROUPED_DATA_FILE,
                 output_dir=CHUNKED_DIR,
-                target_chunk_seconds=TARGET_CHUNK_SECONDS,
-                overlap_seconds=OVERLAP_SECONDS,
+                parent_chunk_seconds=PARENT_CHUNK_SIZE_SECONDS,
+                child_chunk_seconds=CHILD_CHUNK_SIZE_SECONDS,
+                parent_overlap_seconds=PARENT_OVERLAP_SECONDS,
             )
             segmenter.process_file()
 

@@ -52,6 +52,7 @@ python transcript_extractor.py
 python podcast_creator.py
 
 # Step 3: Chunk segments with hierarchical parent/child chunking
+# Output: one JSON per line in PREPROCESSING_FILES/chunked_podcast_segments/*_chunked.jsonl
 python transcript_segmenter.py
 
 # Step 4: Enrich metadata via RSS feeds (optional, takes a while)
@@ -61,6 +62,7 @@ python rss_enrichment.py
 python elastic_data_creator.py
 
 # Step 6 (optional but recommended): Generate embeddings for vector search
+# Note: A small .progress sidecar file is written next to the output JSONL to support resuming.
 python embedding_generator.py
 ```
 
@@ -147,6 +149,8 @@ GET podcast_chunks/_search
 ## Configuration
 
 All paths and settings are defined in `config.py` at the project root. Edit this file to change dataset locations, chunk parameters, or Elasticsearch host.
+
+The transcript extraction step scans `TRANSCRIPTS_JSON_DIR` (defaults to `data/podcasts-no-audio-13GB/podcasts-transcripts-6to7`) so you can iterate on a smaller subset without touching the TSV metadata path.
 
 ## Stopping Elasticsearch
 

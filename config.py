@@ -21,6 +21,10 @@ CONTEXTBUILDING_FILES = DATA_DIR / "context_building_files"
 RAW_DATASET_DIR = DATA_DIR / "podcasts-no-audio-13GB"
 TSV_FILE = RAW_DATASET_DIR / "metadata.tsv"
 
+# Directory containing the raw transcript JSON files to process.
+# Set this to a smaller subset for faster iteration.
+TRANSCRIPTS_JSON_DIR = RAW_DATASET_DIR / "podcasts-transcripts-6to7"
+
 # --- PREPROCESSING OUTPUTS ---
 CLEANED_OUTPUT_DIR = DATA_DIR / "cleaned_output"
 
@@ -39,7 +43,7 @@ ENRICHED_META_DIR = PREPROCESSING_FILES / "enriched_metadata"
 # --- CHUNKING PARAMETERS ---
 TARGET_CHUNK_SECONDS = 120
 OVERLAP_SECONDS = 30
-
+PARENT_OVERLAP_SECONDS = 30
 # Hierarchical chunking (Parent/Child) for RAG
 # - Parent chunks: larger context returned to the LLM
 # - Child chunks: smaller units embedded and searched in Elasticsearch

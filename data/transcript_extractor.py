@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional
 # Import config from project root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
-    RAW_DATASET_DIR,
+    TRANSCRIPTS_JSON_DIR,
     CLEANED_OUTPUT_DIR,
     CLEANED_DATA_FILE,
     GROUPED_DATA_FILE,
@@ -170,7 +170,7 @@ class TranscriptExtractor:
 
 if __name__ == "__main__":
     extractor = TranscriptExtractor(
-        input_dir=RAW_DATASET_DIR,
+        input_dir=TRANSCRIPTS_JSON_DIR,
         output_file=CLEANED_DATA_FILE,
         grouped_file=GROUPED_DATA_FILE,
     )

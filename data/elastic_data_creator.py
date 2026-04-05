@@ -90,6 +90,57 @@ class ElasticDatasetBuilder:
         start_time = time.time()
 
         with open(self.output_file, "w", encoding="utf-8") as outfile:
+            # New format: one JSON per line (child chunk) in *.jsonl files.
+            for chunk_file in self.chunks_dir.glob("*.jsonl"):
+                try:
+                    with open(chunk_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                segment = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+
+                            file_id = str(segment.get("file_id", "")).replace(".json", "")
+                            if not file_id:
+                                continue
+
+                            base_meta = tsv_lookup.get(file_id, {})
+                            category = self._get_category(file_id)
+
+                            chunk_id = segment.get("chunk_id")
+                            parent_id = segment.get("parent_id")
+                            elastic_doc = {
+                                "elastic_id": chunk_id if chunk_id else f"{file_id}_{segment.get('segment_id')}",
+                                "file_id": file_id,
+                                "chunk_id": chunk_id,
+                                "text": str(segment.get("text", "")).strip(),
+                                "start_time": segment.get("start_time", segment.get("start")),
+                                "end_time": segment.get("end_time", segment.get("end")),
+                                "parent_id": parent_id,
+                                "parent_text": str(segment.get("parent_text", "")).strip(),
+                                "parent_start_time": segment.get("parent_start_time"),
+                                "parent_end_time": segment.get("parent_end_time"),
+                                "parent_ids": segment.get("parent_ids"),
+                                "parent_texts": segment.get("parent_texts"),
+                                "show_name": base_meta.get("show_name", "Unknown Show"),
+                                "episode_name": base_meta.get(
+                                    "episode_name", "Unknown Episode"
+                                ),
+                                "publisher": base_meta.get("publisher", "Unknown Publisher"),
+                                "category": category,
+                                "rss_link": base_meta.get("rss_link", ""),
+                            }
+
+                            outfile.write(json.dumps(elastic_doc) + "\n")
+                            self.total_chunks += 1
+                except OSError:
+                    logging.warning(f"Skipping unreadable chunk file: {chunk_file.name}")
+                    continue
+
+            # Legacy format: episode-level JSON files with {file_id, segments:[...]}.
             for chunk_file in self.chunks_dir.glob("*.json"):
                 try:
                     with open(chunk_file, "r", encoding="utf-8") as f:
@@ -104,12 +155,10 @@ class ElasticDatasetBuilder:
                 if not file_id or not segments:
                     continue
 
-                # Retrieve metadata
                 base_meta = tsv_lookup.get(file_id, {})
                 category = self._get_category(file_id)
 
                 for segment in segments:
-                    # Construct flat Elasticsearch document
                     chunk_id = segment.get("chunk_id")
                     parent_id = segment.get("parent_id")
                     elastic_doc = {
@@ -123,6 +172,8 @@ class ElasticDatasetBuilder:
                         "parent_text": segment.get("parent_text", "").strip(),
                         "parent_start_time": segment.get("parent_start_time"),
                         "parent_end_time": segment.get("parent_end_time"),
+                        "parent_ids": segment.get("parent_ids"),
+                        "parent_texts": segment.get("parent_texts"),
                         "show_name": base_meta.get("show_name", "Unknown Show"),
                         "episode_name": base_meta.get(
                             "episode_name", "Unknown Episode"
