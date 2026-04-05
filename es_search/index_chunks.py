@@ -15,6 +15,13 @@ from elasticsearch import Elasticsearch, helpers
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import ELASTIC_READY_FILE, ES_HOST, ES_INDEX
 
+DEFAULT_INPUT_FILE = (
+    Path(__file__).resolve().parent.parent
+    / "data"
+    / "final_output"
+    / "elastic_ready_with_embeddings.jsonl"
+)
+
 INDEX_SETTINGS = {
     "settings": {
         "number_of_shards": 1,
@@ -23,15 +30,31 @@ INDEX_SETTINGS = {
     "mappings": {
         "properties": {
             "file_id":       {"type": "keyword"},
+            "chunk_id":      {"type": "keyword"},
             "segment_id":    {"type": "integer"},
             "text":          {"type": "text", "analyzer": "standard"},
             "start_time":    {"type": "float"},
             "end_time":      {"type": "float"},
+
+            "embedding": {
+                "type": "dense_vector",
+                "dims": 384,
+                "index": True,
+                "similarity": "cosine",
+            },
+
+            "parent_id":         {"type": "keyword"},
+            "parent_ids":        {"type": "keyword"},
+            "parent_text":       {"type": "text", "analyzer": "standard"},
+            "parent_texts":      {"type": "text", "analyzer": "standard"},
+            "parent_start_time": {"type": "float"},
+            "parent_end_time":   {"type": "float"},
+
             "show_name":     {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
             "episode_name":  {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
             "publisher":     {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-            "category":      {"type": "keyword"},
-            "rss_link":      {"type": "keyword"},
+            "category":      {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+            "rss_link":      {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
         }
     }
 }
@@ -69,10 +92,21 @@ def bulk_index(es: Elasticsearch, input_path: Path):
                     "_id": chunk.get("elastic_id", ""),
                     "_source": {
                         "file_id":      chunk.get("file_id", ""),
+                        "chunk_id":     chunk.get("chunk_id", ""),
                         "segment_id":   chunk.get("segment_id", 0),
                         "text":         chunk.get("text", ""),
                         "start_time":   chunk.get("start_time", 0.0),
                         "end_time":     chunk.get("end_time", 0.0),
+
+                        "embedding":         chunk.get("embedding"),
+
+                        "parent_id":         chunk.get("parent_id", ""),
+                        "parent_ids":        chunk.get("parent_ids", []),
+                        "parent_text":       chunk.get("parent_text", ""),
+                        "parent_texts":      chunk.get("parent_texts", []),
+                        "parent_start_time": chunk.get("parent_start_time", 0.0),
+                        "parent_end_time":   chunk.get("parent_end_time", 0.0),
+
                         "show_name":    chunk.get("show_name", ""),
                         "episode_name": chunk.get("episode_name", ""),
                         "publisher":    chunk.get("publisher", ""),
@@ -91,7 +125,7 @@ def bulk_index(es: Elasticsearch, input_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Index podcast chunks into Elasticsearch")
-    parser.add_argument("--input", type=str, default=str(ELASTIC_READY_FILE),
+    parser.add_argument("--input", type=str, default=str(DEFAULT_INPUT_FILE),
                         help="Path to elastic_ready.jsonl")
     parser.add_argument("--recreate", action="store_true", help="Drop and recreate the index")
     args = parser.parse_args()

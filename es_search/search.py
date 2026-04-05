@@ -14,9 +14,21 @@ import json
 from pathlib import Path
 
 from elasticsearch import Elasticsearch
+from elasticsearch import BadRequestError
+from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import ES_HOST, ES_INDEX
+
+
+_QUERY_EMBEDDER: SentenceTransformer | None = None
+
+
+def _get_query_embedder() -> SentenceTransformer:
+    global _QUERY_EMBEDDER
+    if _QUERY_EMBEDDER is None:
+        _QUERY_EMBEDDER = SentenceTransformer("all-MiniLM-L6-v2")
+    return _QUERY_EMBEDDER
 
 
 def format_time(seconds: float) -> str:
@@ -59,8 +71,64 @@ def search(
         }
     }
 
-    body = {
-        "size": top_k,
+    embedder = _get_query_embedder()
+    query_vector = embedder.encode([query], show_progress_bar=False)[0].tolist()
+
+    window_size = 100
+    rank_constant = 60
+
+    def _rrf_fuse(lex_hits: list, vec_hits: list) -> list:
+        # Reciprocal Rank Fusion:
+        # score(d) = sum_{systems} 1 / (rank_constant + rank(d, system))
+        # Using 1-indexed ranks.
+        fused: dict[str, dict] = {}
+
+        def _accumulate(hits: list, source_name: str):
+            for rank, hit in enumerate(hits[:window_size], 1):
+                doc_id = hit.get("_id")
+                if not doc_id:
+                    continue
+
+                entry = fused.get(doc_id)
+                if entry is None:
+                    entry = {
+                        "_id": doc_id,
+                        "_source": hit.get("_source", {}),
+                        "highlight": hit.get("highlight"),
+                        "_rrf": 0.0,
+                        "_seen": set(),
+                    }
+                    fused[doc_id] = entry
+
+                entry["_rrf"] += 1.0 / (rank_constant + rank)
+                entry["_seen"].add(source_name)
+
+                # Prefer lexical highlight/source when available
+                if source_name == "lex":
+                    if hit.get("highlight") is not None:
+                        entry["highlight"] = hit.get("highlight")
+                    if hit.get("_source") is not None:
+                        entry["_source"] = hit.get("_source")
+
+        _accumulate(lex_hits, "lex")
+        _accumulate(vec_hits, "vec")
+
+        fused_list = list(fused.values())
+        fused_list.sort(key=lambda x: x["_rrf"], reverse=True)
+        results = []
+        for item in fused_list[:top_k]:
+            out = {
+                "_id": item["_id"],
+                "_score": item["_rrf"],
+                "_source": item.get("_source", {}),
+            }
+            if item.get("highlight") is not None:
+                out["highlight"] = item["highlight"]
+            results.append(out)
+        return results
+
+    lexical_body = {
+        "size": window_size,
         "query": {
             "bool": {
                 "must": [must_clause],
@@ -75,12 +143,12 @@ def search(
                     "size": 1,
                     "direct_generator": [
                         {
-                            "field": "text", 
-                            "suggest_mode": "popular"
+                            "field": "text",
+                            "suggest_mode": "popular",
                         }
-                    ]
+                    ],
                 }
-            }
+            },
         },
         "highlight": {
             "fields": {
@@ -94,24 +162,46 @@ def search(
         },
     }
 
+    knn_body = {
+        "size": window_size,
+        "knn": {
+            "field": "embedding",
+            "query_vector": query_vector,
+            "k": 50,
+            "num_candidates": 100,
+        },
+    }
+
     filters = []
     if category:
-        filters.append({"term": {"category": category}})
+        filters.append({"term": {"category.keyword": category}})
     if show_name:
-        filters.append({"match": {"show_name": show_name}})
+        filters.append({"term": {"show_name.keyword": show_name}})
     if filters:
-        body["query"]["bool"]["filter"] = filters
+        lexical_body["query"]["bool"]["filter"] = filters
+        knn_body["knn"]["filter"] = filters
 
-    response = es.search(index=ES_INDEX, body=body)
-    
+    lexical_resp = es.search(index=ES_INDEX, body=lexical_body)
+
+    knn_resp = None
+    try:
+        knn_resp = es.search(index=ES_INDEX, body=knn_body)
+    except BadRequestError:
+        knn_resp = {"hits": {"hits": []}}
+
     # Extract spelling suggestion if Elasticsearch found a better alternative
     suggestion = None
-    suggest_options = response.get("suggest", {}).get("spell_check", [])
+    suggest_options = lexical_resp.get("suggest", {}).get("spell_check", [])
     if suggest_options and suggest_options[0].get("options"):
         suggestion = suggest_options[0]["options"][0]["text"]
 
+    fused_hits = _rrf_fuse(
+        lexical_resp.get("hits", {}).get("hits", []),
+        (knn_resp or {}).get("hits", {}).get("hits", []),
+    )
+
     return {
-        "hits": response["hits"]["hits"],
+        "hits": fused_hits,
         "suggestion": suggestion
     }
 
