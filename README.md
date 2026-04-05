@@ -66,6 +66,15 @@ python elastic_data_creator.py
 python embedding_generator.py
 ```
 
+NOTE: you can download the generated embeddings from this link
+https://drive.google.com/drive/folders/1e-xhHxDCSd7QM_QfIU5SBLG_kLXbdyZC?usp=sharing
+
+you will need to download elastic_ready_with_embeddings.jsonl
+and elastic_ready_with_embeddings.jsonl.progress,
+and upload them both onto the data/final_output folder
+
+
+
 Alternatively, you can run the full preprocessing pipeline in one go:
 
 ```bash
