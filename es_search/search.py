@@ -34,18 +34,28 @@ def search(
     top_k: int = 5,
     category: str = None,
     show_name: str = None,
-) -> list[dict]:
+) -> dict:
     """
     Search for chunks matching the query.
-
-    Uses multi_match across text, show_name, and episode_name.
-    Optionally filters by category or show_name.
+    
+    Upgrades:
+    - BM25F Field Boosting (prioritizes category and titles over raw text)
+    - Fuzziness (auto-corrects minor typos)
+    - Phrase Suggester (returns "did you mean?" spelling corrections)
     """
     must_clause = {
         "multi_match": {
             "query": query,
-            "fields": ["text^3", "show_name", "episode_name"],
+            # BM25F Boosting: ^5 means 5x importance. 
+            "fields": [
+                "category^5",       # Highest priority: Exact topic match
+                "show_name^3",      # High priority: Show name match
+                "episode_name^3",   # High priority: Episode title match
+                "text^1",           # Standard priority: Child chunk text
+                "parent_text^1"     # Standard priority: Surrounding context
+            ],
             "type": "best_fields",
+            "fuzziness": "AUTO"     # Typo tolerance
         }
     }
 
@@ -54,6 +64,22 @@ def search(
         "query": {
             "bool": {
                 "must": [must_clause],
+            }
+        },
+        # Spelling correction block
+        "suggest": {
+            "text": query,
+            "spell_check": {
+                "phrase": {
+                    "field": "text",
+                    "size": 1,
+                    "direct_generator": [
+                        {
+                            "field": "text", 
+                            "suggest_mode": "popular"
+                        }
+                    ]
+                }
             }
         },
         "highlight": {
@@ -77,7 +103,17 @@ def search(
         body["query"]["bool"]["filter"] = filters
 
     response = es.search(index=ES_INDEX, body=body)
-    return response["hits"]["hits"]
+    
+    # Extract spelling suggestion if Elasticsearch found a better alternative
+    suggestion = None
+    suggest_options = response.get("suggest", {}).get("spell_check", [])
+    if suggest_options and suggest_options[0].get("options"):
+        suggestion = suggest_options[0]["options"][0]["text"]
+
+    return {
+        "hits": response["hits"]["hits"],
+        "suggestion": suggestion
+    }
 
 
 def main():
@@ -93,14 +129,22 @@ def main():
     if not es.ping():
         sys.exit(f"Cannot connect to Elasticsearch at {ES_HOST}")
 
-    hits = search(es, args.query, top_k=args.top, category=args.category, show_name=args.show)
+    # Run the upgraded search
+    result = search(es, args.query, top_k=args.top, category=args.category, show_name=args.show)
+    hits = result["hits"]
+    suggestion = result["suggestion"]
+
+    # Print JSON and exit early if requested
+    if args.json:
+        print(json.dumps([h["_source"] for h in hits], indent=2))
+        return
+
+    # Print Spelling Suggestion UI if one exists and isn't just the exact query
+    if suggestion and suggestion.lower() != args.query.lower():
+        print(f"\n💡 Did you mean: {suggestion}?")
 
     if not hits:
         print("No results found.")
-        return
-
-    if args.json:
-        print(json.dumps([h["_source"] for h in hits], indent=2))
         return
 
     print(f"\n{'='*70}")
