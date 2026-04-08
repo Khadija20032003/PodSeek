@@ -38,4 +38,6 @@ GROQ_API_KEY=your_key_here
 
 ```bash
 streamlit run streamlit_app.py
+# OR #
+python -m streamlit run streamlit_app.py
 ```
