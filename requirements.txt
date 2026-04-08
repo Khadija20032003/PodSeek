@@ -1,0 +1,10 @@
+ipykernel
+pandas
+feedparser
+beautifulsoup4
+requests
+# Pinning to 8.13.0 to match the Docker Elasticsearch image version
+elasticsearch==8.13.0
+pydantic
+tqdm
+sentence_transformers
