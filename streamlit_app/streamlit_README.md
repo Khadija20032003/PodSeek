@@ -14,7 +14,7 @@ source venv/bin/activate
 Install all required Python libraries from the instruction manual:
 
 ```bash
-pip install -r requirements.txt
+pip install -r streamlit_app/requirements.txt
 ```
 
 ### API Key Setup
@@ -37,7 +37,7 @@ GROQ_API_KEY=your_key_here
 ### Run the Application
 
 ```bash
-streamlit run streamlit_app.py
+streamlit run streamlit_app/streamlit_app.py
 # OR #
-python -m streamlit run streamlit_app.py
+python -m streamlit run streamlit_app/streamlit_app.py
 ```
