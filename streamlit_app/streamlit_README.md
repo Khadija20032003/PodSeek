@@ -37,7 +37,7 @@ GROQ_API_KEY=your_key_here
 ### Run the Application
 
 ```bash
-streamlit run streamlit_app/streamlit_app.py
+streamlit run streamlit_app/streamlit_app.py --server.fileWatcherType=none
 # OR #
-python -m streamlit run streamlit_app/streamlit_app.py
+python -m streamlit run streamlit_app/streamlit_app.py --server.fileWatcherType=none
 ```
