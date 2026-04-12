@@ -3,6 +3,9 @@ import os
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
+import sys
+from pathlib import Path
+from elasticsearch import Elasticsearch
 
 load_dotenv()
 
@@ -14,23 +17,17 @@ llm = ChatGroq(
     model_name="llama-3.1-8b-instant"
 )
 
-# --- THE MOCK DATABASE ---
-# We will replace this with Elasticsearch call later
-def mock_elasticsearch_search(user_query):
-    return [
-        {
-            "podcast_id": "Lex Fridman #300", 
-            "start": "45:10", 
-            "end": "47:10", 
-            "text": "The Higgs Boson is often called the God particle, but physicists actually dislike that term. It gives mass to other fundamental particles."
-        },
-        {
-            "podcast_id": "Science Daily Ep 12", 
-            "start": "12:00", 
-            "end": "14:00", 
-            "text": "When the Large Hadron Collider found the Higgs Boson in 2012, it completed the standard model of particle physics."
-        }
-    ]
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import ES_HOST
+from es_search.search import search as hybrid_search
+from es_search.search import format_time
+
+def elasticsearch_search(user_query: str, top_k: int = 5):
+    es = Elasticsearch(ES_HOST)
+    if not es.ping():
+        raise RuntimeError(f"Cannot connect to Elasticsearch at {ES_HOST}")
+    result = hybrid_search(es, user_query, top_k=top_k)
+    return result
 
 # --- THE LLM PROMPT TEMPLATE ---
 rag_prompt = PromptTemplate.from_template("""
@@ -63,7 +60,35 @@ if st.button("Search Podcasts"):
         with st.spinner("Searching database and reading transcripts..."):
             
             # 1. Get results from the database
-            search_results = mock_elasticsearch_search(query)
+            try:
+                es_result = elasticsearch_search(query, top_k=5)
+                hits = es_result.get("hits", [])
+                search_results = []
+                for hit in hits:
+                    src = hit.get("_source", {})
+                    start = format_time(float(src.get("start_time", 0.0)))
+                    end = format_time(float(src.get("end_time", 0.0)))
+                    show_name = src.get("show_name", "Unknown")
+                    episode_name = src.get("episode_name", "Unknown")
+                    podcast_id = f"{show_name} — {episode_name}"
+
+                    highlight_texts = hit.get("highlight", {}).get("text", [])
+                    if highlight_texts:
+                        snippet = " ".join(str(h) for h in highlight_texts)
+                    else:
+                        snippet = str(src.get("text", ""))
+
+                    search_results.append(
+                        {
+                            "podcast_id": podcast_id,
+                            "start": start,
+                            "end": end,
+                            "text": snippet,
+                        }
+                    )
+            except Exception as e:
+                st.error(str(e))
+                search_results = []
             
             # 2. Format the search results into a single string for the LLM
             context_string = ""
