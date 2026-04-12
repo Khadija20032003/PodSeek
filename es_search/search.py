@@ -11,6 +11,7 @@ Usage:
 import sys
 import argparse
 import json
+import time
 from pathlib import Path
 
 from elasticsearch import Elasticsearch
@@ -18,7 +19,7 @@ from elasticsearch import BadRequestError
 from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import ES_HOST, ES_INDEX
+from config import ES_HOST, ES_INDEX, EMBEDDING_MODEL_NAME
 
 
 _QUERY_EMBEDDER: SentenceTransformer | None = None
@@ -27,7 +28,7 @@ _QUERY_EMBEDDER: SentenceTransformer | None = None
 def _get_query_embedder() -> SentenceTransformer:
     global _QUERY_EMBEDDER
     if _QUERY_EMBEDDER is None:
-        _QUERY_EMBEDDER = SentenceTransformer("all-MiniLM-L6-v2")
+        _QUERY_EMBEDDER = SentenceTransformer(EMBEDDING_MODEL_NAME)
     return _QUERY_EMBEDDER
 
 
@@ -46,6 +47,7 @@ def search(
     top_k: int = 5,
     category: str = None,
     show_name: str = None,
+    embedder: SentenceTransformer | None = None,
 ) -> dict:
     """
     Search for chunks matching the query.
@@ -71,8 +73,12 @@ def search(
         }
     }
 
-    embedder = _get_query_embedder()
+    t_total0 = time.perf_counter()
+
+    embedder = embedder or _get_query_embedder()
+    t_embed0 = time.perf_counter()
     query_vector = embedder.encode([query], show_progress_bar=False)[0].tolist()
+    t_embed_ms = (time.perf_counter() - t_embed0) * 1000.0
 
     window_size = 100
     rank_constant = 60
@@ -181,13 +187,18 @@ def search(
         lexical_body["query"]["bool"]["filter"] = filters
         knn_body["knn"]["filter"] = filters
 
+    t_lex0 = time.perf_counter()
     lexical_resp = es.search(index=ES_INDEX, body=lexical_body)
+    t_lex_ms = (time.perf_counter() - t_lex0) * 1000.0
 
     knn_resp = None
     try:
+        t_knn0 = time.perf_counter()
         knn_resp = es.search(index=ES_INDEX, body=knn_body)
+        t_knn_ms = (time.perf_counter() - t_knn0) * 1000.0
     except BadRequestError:
         knn_resp = {"hits": {"hits": []}}
+        t_knn_ms = 0.0
 
     # Extract spelling suggestion if Elasticsearch found a better alternative
     suggestion = None
@@ -195,14 +206,25 @@ def search(
     if suggest_options and suggest_options[0].get("options"):
         suggestion = suggest_options[0]["options"][0]["text"]
 
+    t_rrf0 = time.perf_counter()
     fused_hits = _rrf_fuse(
         lexical_resp.get("hits", {}).get("hits", []),
         (knn_resp or {}).get("hits", {}).get("hits", []),
     )
+    t_rrf_ms = (time.perf_counter() - t_rrf0) * 1000.0
+
+    t_total_ms = (time.perf_counter() - t_total0) * 1000.0
 
     return {
         "hits": fused_hits,
-        "suggestion": suggestion
+        "suggestion": suggestion,
+        "timings": {
+            "embed_ms": t_embed_ms,
+            "lexical_es_ms": t_lex_ms,
+            "knn_es_ms": t_knn_ms,
+            "rrf_ms": t_rrf_ms,
+            "total_ms": t_total_ms,
+        },
     }
 
 

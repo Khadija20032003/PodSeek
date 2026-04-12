@@ -4,8 +4,10 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 import sys
+import time
 from pathlib import Path
 from elasticsearch import Elasticsearch
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -14,19 +16,30 @@ api_key = os.getenv("GROQ_API_KEY").strip()
 llm = ChatGroq(
     temperature=0,
     groq_api_key=api_key,
-    model_name="llama-3.1-8b-instant"
+    model_name="llama-3.1-8b-instant",
+    streaming=True,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import ES_HOST
+from config import ES_HOST, EMBEDDING_MODEL_NAME
 from es_search.search import search as hybrid_search
 from es_search.search import format_time
+import es_search.search as es_search_module
+
+@st.cache_resource
+def get_es_client() -> Elasticsearch:
+    return Elasticsearch(ES_HOST)
+
+@st.cache_resource
+def get_query_embedder() -> SentenceTransformer:
+    return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
 def elasticsearch_search(user_query: str, top_k: int = 5):
-    es = Elasticsearch(ES_HOST)
+    es = get_es_client()
     if not es.ping():
         raise RuntimeError(f"Cannot connect to Elasticsearch at {ES_HOST}")
-    result = hybrid_search(es, user_query, top_k=top_k)
+    embedder = get_query_embedder()
+    result = hybrid_search(es, user_query, top_k=top_k, embedder=embedder)
     return result
 
 # --- THE LLM PROMPT TEMPLATE ---
@@ -57,11 +70,21 @@ query = st.text_input("What topic are you looking for? (e.g., 'Higgs Boson')")
 # The Search Button Action
 if st.button("Search Podcasts"):
     if query:
-        with st.spinner("Searching database and reading transcripts..."):
-            
-            # 1. Get results from the database
+        # 1) Elasticsearch phase: show results ASAP
+        with st.spinner("Searching Elasticsearch..."):
             try:
                 es_result = elasticsearch_search(query, top_k=5)
+                timings = es_result.get("timings", {}) or {}
+                print(f"[Debug] es_search.search loaded from: {getattr(es_search_module, '__file__', 'unknown')}")
+                print(f"[Latency] Raw hybrid timings dict: {timings}")
+                print(
+                    "[Latency] Hybrid search timings (ms): "
+                    f"embed={timings.get('embed_ms', 0.0):.3f} "
+                    f"lexical_es={timings.get('lexical_es_ms', 0.0):.3f} "
+                    f"knn_es={timings.get('knn_es_ms', 0.0):.3f} "
+                    f"rrf={timings.get('rrf_ms', 0.0):.3f} "
+                    f"total={timings.get('total_ms', 0.0):.3f}"
+                )
                 hits = es_result.get("hits", [])
                 search_results = []
                 for hit in hits:
@@ -89,22 +112,52 @@ if st.button("Search Podcasts"):
             except Exception as e:
                 st.error(str(e))
                 search_results = []
-            
-            # 2. Format the search results into a single string for the LLM
-            context_string = ""
+
+        st.subheader("Raw Audio Chunks Found")
+        if search_results:
             for result in search_results:
-                context_string += f"\n- [{result['podcast_id']} | {result['start']}-{result['end']}]: {result['text']}"
-            
-            # 3. Create the final prompt and run the LLM
-            formatted_prompt = rag_prompt.format(question=query, context=context_string)
+                st.info(
+                    f"**{result['podcast_id']}** ({result['start']} - {result['end']})\n\n{result['text']}"
+                )
+        else:
+            st.warning("No Elasticsearch results found.")
+
+        # 2) LLM phase: stream answer after ES results are visible
+        st.subheader("Podcast Results:")
+        answer_placeholder = st.empty()
+
+        context_string = ""
+        for result in search_results:
+            context_string += f"\n- [{result['podcast_id']} | {result['start']}-{result['end']}]: {result['text']}"
+
+        formatted_prompt = rag_prompt.format(question=query, context=context_string)
+
+        try:
+            t_llm0 = time.perf_counter()
+            t_first_token = {"t": None}
+
+            def _stream_text():
+                for chunk in llm.stream(formatted_prompt):
+                    chunk_text = getattr(chunk, "content", None)
+                    if not chunk_text:
+                        continue
+                    if t_first_token["t"] is None:
+                        t_first_token["t"] = time.perf_counter()
+                    yield chunk_text
+
+            with st.spinner("Generating answer..."):
+                final_text = answer_placeholder.write_stream(_stream_text())
+
+            t_done = time.perf_counter()
+            ttft_ms = ((t_first_token["t"] - t_llm0) * 1000.0) if t_first_token["t"] else 0.0
+            total_ms = (t_done - t_llm0) * 1000.0
+            print(f"[Latency] LLM stream TTFT_ms={ttft_ms:.1f} total_ms={total_ms:.1f}")
+        except Exception:
+            t_llm0 = time.perf_counter()
             response = llm.invoke(formatted_prompt)
-            
-            # 4. Display the results
-            st.subheader("Podcast Results:")
-            st.write(response.content)
-            
-            st.subheader("Raw Audio Chunks Found")
-            for result in search_results:
-                st.info(f"**{result['podcast_id']}** ({result['start']} - {result['end']})\n\n{result['text']}")
+            t_done = time.perf_counter()
+            total_ms = (t_done - t_llm0) * 1000.0
+            answer_placeholder.write(response.content)
+            print(f"[Latency] LLM invoke total_ms={total_ms:.1f}")
     else:
         st.warning("Please enter a search query first.")
