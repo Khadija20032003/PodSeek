@@ -34,12 +34,29 @@ def get_es_client() -> Elasticsearch:
 def get_query_embedder() -> SentenceTransformer:
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-def elasticsearch_search(user_query: str, top_k: int = 5):
+def elasticsearch_search(user_query: str, top_k: int = 5, category: str = None, show_name: str = None, embedder=None, enable_knn: bool = True, knn_k: int = 50, num_candidates: int = 100, window_size: int = 100, rank_constant: int = 60, fuzziness: str = "AUTO", include_parent_text: bool = True, include_category_boost: bool = True, include_title_boost: bool = True):
     es = get_es_client()
     if not es.ping():
         raise RuntimeError(f"Cannot connect to Elasticsearch at {ES_HOST}")
-    embedder = get_query_embedder()
-    result = hybrid_search(es, user_query, top_k=top_k, embedder=embedder)
+    if embedder is None:
+        embedder = get_query_embedder()
+    result = hybrid_search(
+        es,
+        user_query,
+        top_k=top_k,
+        category=category,
+        show_name=show_name,
+        embedder=embedder,
+        enable_knn=enable_knn,
+        knn_k=knn_k,
+        num_candidates=num_candidates,
+        window_size=window_size,
+        rank_constant=rank_constant,
+        fuzziness=fuzziness,
+        include_parent_text=include_parent_text,
+        include_category_boost=include_category_boost,
+        include_title_boost=include_title_boost,
+    )
     return result
 
 # --- THE LLM PROMPT TEMPLATE ---
@@ -64,17 +81,91 @@ st.set_page_config(page_title="PodSeek", page_icon="🎙️")
 st.title("🎙️ PodSeek")
 st.write("Search the database to find exactly where a topic was discussed.")
 
+top_k = 5
+enable_knn = True
+knn_k = 50
+num_candidates = 100
+window_size = 100
+rank_constant = 60
+fuzziness = "AUTO"
+include_parent_text = True
+include_category_boost = True
+include_title_boost = True
+category_filter = ""
+show_filter = ""
+
+with st.sidebar.expander("Search settings", expanded=False):
+    top_k = st.slider("Results", min_value=1, max_value=20, value=top_k, step=1)
+
+    enable_knn = st.toggle("Hybrid (BM25 + Vector)", value=enable_knn)
+    knn_k = st.slider("kNN k", min_value=1, max_value=200, value=knn_k, step=1, disabled=not enable_knn)
+    num_candidates = st.slider(
+        "kNN num_candidates",
+        min_value=10,
+        max_value=500,
+        value=num_candidates,
+        step=10,
+        disabled=not enable_knn,
+    )
+
+    window_size = st.slider(
+        "RRF window_size",
+        min_value=10,
+        max_value=300,
+        value=window_size,
+        step=10,
+    )
+    rank_constant = st.slider(
+        "RRF rank_constant",
+        min_value=1,
+        max_value=100,
+        value=rank_constant,
+        step=1,
+    )
+
+    fuzziness_mode = st.selectbox("Fuzziness", options=["AUTO", "Off"], index=0)
+    fuzziness = None if fuzziness_mode == "Off" else "AUTO"
+
+    include_parent_text = st.toggle("Use parent context", value=include_parent_text)
+    include_category_boost = st.toggle("Boost category field", value=include_category_boost)
+    include_title_boost = st.toggle("Boost show/episode fields", value=include_title_boost)
+
+    st.subheader("Filters")
+    category_filter = st.text_input("Category (exact)", value=category_filter)
+    show_filter = st.text_input("Show name (exact)", value=show_filter)
+
 # The Search Bar
-query = st.text_input("What topic are you looking for? (e.g., 'Higgs Boson')")
+if "query" not in st.session_state:
+    st.session_state.query = ""
+
+with st.form("search_form"):
+    query = st.text_input("What topic are you looking for? (e.g., 'Higgs Boson')", key="query")
+    submitted = st.form_submit_button("Search Podcasts")
 
 # The Search Button Action
-if st.button("Search Podcasts"):
+if submitted:
     if query:
+
         # 1) Elasticsearch phase: show results ASAP
         with st.spinner("Searching Elasticsearch..."):
             try:
-                es_result = elasticsearch_search(query, top_k=5)
+                es_result = elasticsearch_search(
+                    query,
+                    top_k=top_k,
+                    category=category_filter or None,
+                    show_name=show_filter or None,
+                    enable_knn=enable_knn,
+                    knn_k=knn_k,
+                    num_candidates=num_candidates,
+                    window_size=window_size,
+                    rank_constant=rank_constant,
+                    fuzziness=fuzziness,
+                    include_parent_text=include_parent_text,
+                    include_category_boost=include_category_boost,
+                    include_title_boost=include_title_boost,
+                )
                 timings = es_result.get("timings", {}) or {}
+                query_suggestions = es_result.get("query_suggestions", []) or []
                 print(f"[Debug] es_search.search loaded from: {getattr(es_search_module, '__file__', 'unknown')}")
                 print(f"[Latency] Raw hybrid timings dict: {timings}")
                 print(
@@ -85,6 +176,7 @@ if st.button("Search Podcasts"):
                     f"rrf={timings.get('rrf_ms', 0.0):.3f} "
                     f"total={timings.get('total_ms', 0.0):.3f}"
                 )
+
                 hits = es_result.get("hits", [])
                 search_results = []
                 for hit in hits:
@@ -112,6 +204,15 @@ if st.button("Search Podcasts"):
             except Exception as e:
                 st.error(str(e))
                 search_results = []
+                query_suggestions = []
+
+        if query_suggestions:
+            with st.expander("Suggested queries", expanded=False):
+                for i, s in enumerate(query_suggestions[:3]):
+                    label = s if len(s) <= 80 else (s[:77] + "...")
+                    if st.button(label, key=f"query_suggestion_{i}"):
+                        st.session_state.query = s
+                        st.rerun()
 
         st.subheader("Raw Audio Chunks Found")
         if search_results:

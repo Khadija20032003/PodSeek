@@ -12,6 +12,7 @@ import sys
 import argparse
 import json
 import time
+import re
 from pathlib import Path
 
 from elasticsearch import Elasticsearch
@@ -23,6 +24,14 @@ from config import ES_HOST, ES_INDEX, EMBEDDING_MODEL_NAME
 
 
 _QUERY_EMBEDDER: SentenceTransformer | None = None
+
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "he",
+    "her", "hers", "him", "his", "i", "if", "in", "into", "is", "it", "its", "me", "my", "no",
+    "not", "of", "on", "or", "our", "ours", "she", "so", "than", "that", "the", "their", "them",
+    "there", "these", "they", "this", "to", "us", "was", "we", "were", "what", "when", "where",
+    "which", "who", "will", "with", "you", "your",
+}
 
 
 def _get_query_embedder() -> SentenceTransformer:
@@ -48,6 +57,15 @@ def search(
     category: str = None,
     show_name: str = None,
     embedder: SentenceTransformer | None = None,
+    enable_knn: bool = True,
+    knn_k: int = 50,
+    num_candidates: int = 100,
+    window_size: int = 100,
+    rank_constant: int = 60,
+    fuzziness: str | None = "AUTO",
+    include_parent_text: bool = True,
+    include_category_boost: bool = True,
+    include_title_boost: bool = True,
 ) -> dict:
     """
     Search for chunks matching the query.
@@ -57,21 +75,28 @@ def search(
     - Fuzziness (auto-corrects minor typos)
     - Phrase Suggester (returns "did you mean?" spelling corrections)
     """
-    must_clause = {
-        "multi_match": {
-            "query": query,
-            # BM25F Boosting: ^5 means 5x importance. 
-            "fields": [
-                "category^5",       # Highest priority: Exact topic match
-                "show_name^3",      # High priority: Show name match
-                "episode_name^3",   # High priority: Episode title match
-                "text^1",           # Standard priority: Child chunk text
-                "parent_text^1"     # Standard priority: Surrounding context
-            ],
-            "type": "best_fields",
-            "fuzziness": "AUTO"     # Typo tolerance
-        }
+    query_terms = set(re.findall(r"[a-zA-Z0-9]+", query.lower()))
+
+    fields = [
+        "text^1",
+    ]
+    if include_parent_text:
+        fields.append("parent_text^1")
+    if include_category_boost:
+        fields.append("category^5")
+    if include_title_boost:
+        fields.append("show_name^3")
+        fields.append("episode_name^3")
+
+    multi_match = {
+        "query": query,
+        "fields": fields,
+        "type": "best_fields",
     }
+    if fuzziness is not None:
+        multi_match["fuzziness"] = fuzziness
+
+    must_clause = {"multi_match": multi_match}
 
     t_total0 = time.perf_counter()
 
@@ -79,9 +104,6 @@ def search(
     t_embed0 = time.perf_counter()
     query_vector = embedder.encode([query], show_progress_bar=False)[0].tolist()
     t_embed_ms = (time.perf_counter() - t_embed0) * 1000.0
-
-    window_size = 100
-    rank_constant = 60
 
     def _rrf_fuse(lex_hits: list, vec_hits: list) -> list:
         # Reciprocal Rank Fusion:
@@ -168,15 +190,17 @@ def search(
         },
     }
 
-    knn_body = {
-        "size": window_size,
-        "knn": {
-            "field": "embedding",
-            "query_vector": query_vector,
-            "k": 50,
-            "num_candidates": 100,
-        },
-    }
+    knn_body = None
+    if enable_knn:
+        knn_body = {
+            "size": window_size,
+            "knn": {
+                "field": "embedding",
+                "query_vector": query_vector,
+                "k": int(knn_k),
+                "num_candidates": int(num_candidates),
+            },
+        }
 
     filters = []
     if category:
@@ -185,26 +209,57 @@ def search(
         filters.append({"term": {"show_name.keyword": show_name}})
     if filters:
         lexical_body["query"]["bool"]["filter"] = filters
-        knn_body["knn"]["filter"] = filters
+        if knn_body is not None:
+            knn_body["knn"]["filter"] = filters
 
     t_lex0 = time.perf_counter()
     lexical_resp = es.search(index=ES_INDEX, body=lexical_body)
     t_lex_ms = (time.perf_counter() - t_lex0) * 1000.0
 
-    knn_resp = None
-    try:
-        t_knn0 = time.perf_counter()
-        knn_resp = es.search(index=ES_INDEX, body=knn_body)
-        t_knn_ms = (time.perf_counter() - t_knn0) * 1000.0
-    except BadRequestError:
-        knn_resp = {"hits": {"hits": []}}
-        t_knn_ms = 0.0
+    knn_resp = {"hits": {"hits": []}}
+    t_knn_ms = 0.0
+    if knn_body is not None:
+        try:
+            t_knn0 = time.perf_counter()
+            knn_resp = es.search(index=ES_INDEX, body=knn_body)
+            t_knn_ms = (time.perf_counter() - t_knn0) * 1000.0
+        except BadRequestError:
+            knn_resp = {"hits": {"hits": []}}
+            t_knn_ms = 0.0
 
     # Extract spelling suggestion if Elasticsearch found a better alternative
     suggestion = None
     suggest_options = lexical_resp.get("suggest", {}).get("spell_check", [])
     if suggest_options and suggest_options[0].get("options"):
         suggestion = suggest_options[0]["options"][0]["text"]
+
+    prf_counts: dict[str, int] = {}
+    for hit in lexical_resp.get("hits", {}).get("hits", [])[:10]:
+        src = hit.get("_source", {})
+        text = " ".join(
+            [
+                str(src.get("text", "")),
+                str(src.get("parent_text", "")),
+                str(src.get("episode_name", "")),
+                str(src.get("show_name", "")),
+                str(src.get("category", "")),
+            ]
+        )
+        for tok in re.findall(r"[a-zA-Z0-9]+", text.lower()):
+            if tok in _STOPWORDS:
+                continue
+            if len(tok) < 3:
+                continue
+            if tok in query_terms:
+                continue
+            prf_counts[tok] = prf_counts.get(tok, 0) + 1
+
+    top_prf_terms = [t for t, _ in sorted(prf_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]]
+    query_suggestions: list[str] = []
+    if suggestion and suggestion.lower() != query.lower():
+        query_suggestions.append(suggestion)
+    if top_prf_terms:
+        query_suggestions.append(query + " " + " ".join(top_prf_terms))
 
     t_rrf0 = time.perf_counter()
     fused_hits = _rrf_fuse(
@@ -218,6 +273,7 @@ def search(
     return {
         "hits": fused_hits,
         "suggestion": suggestion,
+        "query_suggestions": query_suggestions,
         "timings": {
             "embed_ms": t_embed_ms,
             "lexical_es_ms": t_lex_ms,
