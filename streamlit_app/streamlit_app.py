@@ -105,7 +105,6 @@ if st.button("Search Podcasts"):
                     highlights = result.get("highlight", {}).get("text", [])
                     if highlights:
                         display_text = "... " + " ... ".join(highlights) + " ..."
-                        # Markdown might break if not careful with **, but streamlit usually handles it
                     else:
                         display_text = src.get("text", "")[:300] + "..."
                     
