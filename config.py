@@ -23,7 +23,7 @@ TSV_FILE = RAW_DATASET_DIR / "metadata.tsv"
 
 # Directory containing the raw transcript JSON files to process.
 # Set this to a smaller subset for faster iteration.
-TRANSCRIPTS_JSON_DIR = RAW_DATASET_DIR / "podcasts-transcripts-6to7"
+TRANSCRIPTS_JSON_DIR = RAW_DATASET_DIR / "spotify-podcasts-2020" / "podcasts-transcripts"
 
 # --- PREPROCESSING OUTPUTS ---
 CLEANED_OUTPUT_DIR = DATA_DIR / "cleaned_output"
