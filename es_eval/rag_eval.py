@@ -1,15 +1,22 @@
 """
-rag_eval.py — Evaluate PodSeek's RAG pipeline with RAGAS.
-Evaluates faithfulness and answer relevancy — NO ground truth dataset needed.
-Uses Groq (free) as the RAGAS judge LLM instead of OpenAI.
+rag_eval.py — Evaluate PodSeek's RAG pipeline.
 
-Metrics:
-  - Faithfulness: Is the LLM answer grounded in the retrieved chunks? (no hallucination)
-  - Answer Relevancy: Does the answer actually address the question?
+Two evaluation modes:
+  1. Retrieval metrics (ground truth from dataset.json)
+     - Hit@K:         Was any correct chunk in the top-K results?
+     - MRR:           Mean reciprocal rank of the first correct hit
+     - Precision@K:   Fraction of top-K results that are correct
+     - Context Recall: Of all ground-truth chunks, what fraction was retrieved?
+
+  2. RAG quality (RAGAS, Groq as judge)
+     - Faithfulness:        Is the answer grounded in retrieved chunks?
+     - Answer Relevancy:    Does the answer address the question?
+     - Factual Correctness: Is the answer correct vs. the known reference?
 
 Usage:
-    python rag_eval.py
-    python rag_eval.py --top 10
+    python rag_eval.py --dataset dataset.json
+    python rag_eval.py --dataset dataset.json --top 10
+    python rag_eval.py --dataset dataset.json --skip-ragas
 """
 
 import sys
@@ -23,12 +30,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from elasticsearch import Elasticsearch
 from langchain_groq import ChatGroq
-from ragas import evaluate, EvaluationDataset, SingleTurnSample
-from ragas.metrics import Faithfulness, ResponseRelevancy
-from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper
-from ragas.run_config import RunConfig
-from langchain_huggingface import HuggingFaceEmbeddings
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "es_search"))
@@ -37,24 +38,169 @@ from search import search, format_time
 
 load_dotenv()
 
-# Test Questions 
-EVAL_QUESTIONS = [
-    "What are some common fitness myths?",
-    "How does meditation help with stress?",
-    "What is cryptocurrency and how does it work?",
-    "What are the benefits of intermittent fasting?",
-    "How does climate change affect the environment?",
-    "What is artificial intelligence?",
-    "How do you start a podcast?",
-    "What is the importance of mental health?",
-    "How does social media affect teenagers?",
-    "What are the basics of investing in the stock market?",
-]
 
-# RAG Pipeline
+# ---------------------------------------------------------------------------
+# Load ground-truth dataset
+# ---------------------------------------------------------------------------
+
+def load_dataset(path: Path) -> list:
+    """
+    Load dataset.json and flatten into evaluation cases.
+    Each case has: question, title, reference_answer,
+                   expected_elastic_ids, expected_file_ids,
+                   expected_show_names, expected_episode_names,
+                   expected_chunk_texts
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    cases = []
+    for entry in data:
+        true_chunks = entry.get("true_chunks", [])
+        cases.append({
+            "question": entry["question"],
+            "title": entry.get("title", ""),
+            "reference_answer": entry.get("abstract", ""),
+            "expected_elastic_ids": {c["elastic_id"] for c in true_chunks},
+            "expected_file_ids": {c["file_id"] for c in true_chunks},
+            "expected_show_names": {c["show_name"].strip().lower() for c in true_chunks},
+            "expected_episode_names": {c["episode_name"].strip().lower() for c in true_chunks},
+            "expected_chunk_texts": [c["text"] for c in true_chunks],
+            "n_expected": len(true_chunks),
+        })
+
+    print(f"Loaded {len(cases)} evaluation cases from {path}")
+    return cases
+
+
+# ---------------------------------------------------------------------------
+# Retrieval metrics
+# ---------------------------------------------------------------------------
+
+def is_correct_hit(hit: dict, case: dict) -> bool:
+    """Check if a retrieved chunk belongs to the expected ground-truth set."""
+    hit_id = hit.get("_id", "")
+    if hit_id in case["expected_elastic_ids"]:
+        return True
+
+    src = hit.get("_source", {})
+    file_id = src.get("file_id", "").strip()
+    if file_id in case["expected_file_ids"]:
+        return True
+
+    show = src.get("show_name", "").strip().lower()
+    episode = src.get("episode_name", "").strip().lower()
+    if show in case["expected_show_names"] and episode in case["expected_episode_names"]:
+        return True
+
+    return False
+
+
+def reciprocal_rank(hits: list, case: dict) -> float:
+    for rank, hit in enumerate(hits, 1):
+        if is_correct_hit(hit, case):
+            return 1.0 / rank
+    return 0.0
+
+
+def hit_at_k(hits: list, case: dict, k: int) -> bool:
+    return any(is_correct_hit(h, case) for h in hits[:k])
+
+
+def precision_at_k(hits: list, case: dict, k: int) -> float:
+    correct = sum(1 for h in hits[:k] if is_correct_hit(h, case))
+    return correct / k if k > 0 else 0.0
+
+
+def context_recall(hits: list, case: dict) -> float:
+    """Of all ground-truth chunks, what fraction appeared in the retrieved results?"""
+    n_expected = case.get("n_expected", 0)
+    if n_expected == 0:
+        return 0.0
+    n_found = sum(1 for h in hits if is_correct_hit(h, case))
+    return n_found / n_expected
+
+
+def run_retrieval_eval(es: Elasticsearch, cases: list, top_k: int) -> list:
+    print(f"\n{'='*60}")
+    print(f"  RETRIEVAL EVALUATION  ({len(cases)} questions, top_k={top_k})")
+    print(f"{'='*60}")
+
+    results = []
+    for i, case in enumerate(cases):
+        q = case["question"]
+        print(f"  [{i+1}/{len(cases)}] {q[:70]}...")
+
+        try:
+            result = search(es, q, top_k=top_k)
+            hits = result["hits"]
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            hits = []
+
+        rr = reciprocal_rank(hits, case)
+        h1 = hit_at_k(hits, case, k=1)
+        h3 = hit_at_k(hits, case, k=3)
+        hk = hit_at_k(hits, case, k=top_k)
+        pk = precision_at_k(hits, case, k=top_k)
+        cr = context_recall(hits, case)
+
+        correct_ranks = [
+            rank for rank, h in enumerate(hits, 1)
+            if is_correct_hit(h, case)
+        ]
+
+        results.append({
+            **case,
+            "hits": hits,
+            "rr": rr,
+            "hit@1": h1,
+            "hit@3": h3,
+            f"hit@{top_k}": hk,
+            f"p@{top_k}": pk,
+            "context_recall": cr,
+            "correct_ranks": correct_ranks,
+        })
+
+        status = f"rank {correct_ranks[0]}" if correct_ranks else "NOT FOUND"
+        print(f"    {status}  |  RR={rr:.3f}  |  P@{top_k}={pk:.3f}  |  Recall={cr:.3f}")
+
+    return results
+
+
+def print_retrieval_summary(results: list, top_k: int):
+    n = len(results)
+    if n == 0:
+        return
+
+    mrr = sum(r["rr"] for r in results) / n
+    h1 = sum(r["hit@1"] for r in results) / n
+    h3 = sum(r["hit@3"] for r in results) / n
+    hk = sum(r[f"hit@{top_k}"] for r in results) / n
+    pk = sum(r[f"p@{top_k}"] for r in results) / n
+    cr = sum(r["context_recall"] for r in results) / n
+
+    print(f"\n{'='*60}")
+    print(f"  RETRIEVAL RESULTS  (n={n})")
+    print(f"{'='*60}")
+    print(f"  MRR              {mrr:.4f}")
+    print(f"  Hit@1            {h1:.4f}")
+    print(f"  Hit@3            {h3:.4f}")
+    print(f"  Hit@{top_k:<2}           {hk:.4f}")
+    print(f"  Precision@{top_k:<2}     {pk:.4f}")
+    print(f"  Context Recall   {cr:.4f}")
+    print(f"{'='*60}")
+
+    return {"mrr": mrr, "hit_at_1": h1, "hit_at_3": h3,
+            f"hit_at_{top_k}": hk, f"p_at_{top_k}": pk,
+            "context_recall": cr}
+
+
+# ---------------------------------------------------------------------------
+# RAG answer generation
+# ---------------------------------------------------------------------------
 
 def generate_answer(llm, question: str, hits: list) -> str:
-    """Send retrieved contexts + question to the LLM and get an answer."""
     context_string = "\n\n".join(
         f"[Chunk {i+1} | Show: {hit['_source'].get('show_name', 'Unknown')} | "
         f"Episode: {hit['_source'].get('episode_name', 'Unknown')} | "
@@ -85,188 +231,213 @@ Answer:"""
     return response.content
 
 
-def run_rag_pipeline(es, llm, questions, top_k=5):
-    results = []
-    for i, question in enumerate(questions):
-        print(f"  [{i+1}/{len(questions)}] Processing: {question[:60]}...")
-        try:
-            result = search(es, question, top_k=top_k)
-            hits = result["hits"]
-            contexts = [
-                hit["_source"].get("parent_text") or hit["_source"].get("text", "")
-                for hit in hits
-            ]
-            answer = generate_answer(llm, question, hits)
-            results.append({
-                "question": question,
-                "answer": answer,
-                "contexts": contexts,
-            })
-        except Exception as e:
-            print(f"    ERROR on question {i+1}: {e}")
-            results.append({
-                "question": question,
-                "answer": "Error generating answer.",
-                "contexts": [],
-            })
-    return results
+# ---------------------------------------------------------------------------
+# RAGAS evaluation
+# ---------------------------------------------------------------------------
 
+def run_ragas_eval(llm, cases: list, top_k: int, es: Elasticsearch) -> tuple:
+    from ragas import evaluate, EvaluationDataset, SingleTurnSample
+    from ragas.metrics import Faithfulness, ResponseRelevancy
+    from ragas.metrics.collections import FactualCorrectness
+    from ragas.llms import LangchainLLMWrapper, llm_factory
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+    from ragas.run_config import RunConfig
+    from langchain_huggingface import HuggingFaceEmbeddings
+    from groq import Groq
 
-# Evaluation
-
-def build_ragas_dataset(rag_results: list[dict]) -> EvaluationDataset:
-    """Convert RAG pipeline output to RAGAS EvaluationDataset."""
-    samples = []
-    for item in rag_results:
-        samples.append(
-            SingleTurnSample(
-                user_input=item["question"],
-                response=item["answer"],
-                retrieved_contexts=item["contexts"],
-            )
-        )
-    return EvaluationDataset(samples=samples)
-
-
-def run_evaluation(
-    es: Elasticsearch,
-    llm: ChatGroq,
-    questions: list,
-    top_k: int = 5,
-) -> dict:
-    """Run RAGAS evaluation — faithfulness and answer relevancy only."""
     print(f"\n{'='*60}")
-    print(f"  Running RAG pipeline on {len(questions)} questions...")
+    print(f"  RAGAS EVALUATION  ({len(cases)} questions)")
     print(f"{'='*60}")
 
-    # Run RAG pipeline
-    rag_results = run_rag_pipeline(es, llm, questions, top_k=top_k)
+    rag_results = []
+    for i, case in enumerate(cases):
+        q = case["question"]
+        print(f"  [{i+1}/{len(cases)}] Generating answer: {q[:55]}...")
+        try:
+            result = search(es, q, top_k=top_k)
+            hits = result["hits"]
+            contexts = [
+                h["_source"].get("parent_text") or h["_source"].get("text", "")
+                for h in hits
+            ]
+            answer = generate_answer(llm, q, hits)
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            answer, contexts = "Error generating answer.", []
 
-    # Build RAGAS dataset 
-    eval_dataset = build_ragas_dataset(rag_results)
+        rag_results.append({
+            "question": q,
+            "answer": answer,
+            "contexts": contexts,
+            "reference": case.get("reference_answer", ""),
+        })
 
-    # Set up Groq as the RAGAS judge
-    print("\n  Running RAGAS evaluation (using Groq as judge)...")
+    samples = [
+        SingleTurnSample(
+            user_input=r["question"],
+            response=r["answer"],
+            retrieved_contexts=r["contexts"],
+            reference=r["reference"],
+        )
+        for r in rag_results
+    ]
 
+    # LangchainLLMWrapper for Faithfulness + ResponseRelevancy
     ragas_llm = LangchainLLMWrapper(llm)
-    ragas_embeddings = LangchainEmbeddingsWrapper(
+    ragas_embs = LangchainEmbeddingsWrapper(
         HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     )
 
-    # Configure metrics
-    faithfulness_metric = Faithfulness(llm=ragas_llm)
-    relevancy_metric = ResponseRelevancy(llm=ragas_llm, embeddings=ragas_embeddings)
-    # strictness=1 prevents the 'n must be at most 1' error on Groq
-    relevancy_metric.strictness = 1
-
-    # RunConfig: serialize calls to avoid Groq rate limits + longer timeout
-    run_config = RunConfig(
-        max_workers=1,
-        timeout=120,
-        max_retries=3,
+    # llm_factory with Groq client for FactualCorrectness
+    groq_api_key = os.getenv("GROQ_API_KEY", "").strip()
+    groq_client = Groq(api_key=groq_api_key)
+    factual_llm = llm_factory(
+        "llama-3.1-8b-instant",
+        provider="groq",
+        client=groq_client,
     )
 
+    faithfulness_metric = Faithfulness(llm=ragas_llm)
+    relevancy_metric = ResponseRelevancy(llm=ragas_llm, embeddings=ragas_embs)
+    relevancy_metric.strictness = 1
+    factual_metric = FactualCorrectness(llm=factual_llm)
+
+    run_config = RunConfig(max_workers=1, timeout=120, max_retries=3)
+
+    print("\n  Running RAGAS evaluation (using Groq as judge)...")
     result = evaluate(
-        dataset=eval_dataset,
-        metrics=[faithfulness_metric, relevancy_metric],
+        dataset=EvaluationDataset(samples=samples),
+        metrics=[faithfulness_metric, relevancy_metric, factual_metric],
         run_config=run_config,
     )
 
-    # Extract scores from EvaluationResult via pandas
-    try:
-        result_df = result.to_pandas()
-        result_dict = result_df.mean(numeric_only=True).to_dict()
-    except Exception:
-        # Fallback: access columns individually
-        result_dict = {}
-        for col in ["faithfulness", "answer_relevancy"]:
-            try:
-                result_dict[col] = result.to_pandas()[col].mean()
-            except Exception:
-                result_dict[col] = float("nan")
+    df = result.to_pandas()
+    print(f"\n  Available RAGAS columns: {list(df.columns)}")
+
+    def _safe_mean(col_name):
+        if col_name in df.columns:
+            return round(float(df[col_name].mean()), 4)
+        return float("nan")
 
     scores = {
-        "faithfulness": round(result_dict.get("faithfulness", float("nan")), 4),
-        "answer_relevancy": round(result_dict.get("answer_relevancy", float("nan")), 4),
+        "faithfulness": _safe_mean("faithfulness"),
+        "answer_relevancy": _safe_mean("answer_relevancy"),
+        "factual_correctness": _safe_mean("factual_correctness"),
     }
 
-    # Print results
     print(f"\n{'='*60}")
-    print(f"  RAGAS EVALUATION RESULTS")
+    print(f"  RAGAS RESULTS")
     print(f"{'='*60}")
-    print(f"  Faithfulness:       {scores['faithfulness']}")
-    print(f"    -> Is the answer grounded in the retrieved chunks?")
+    print(f"  Faithfulness:          {scores['faithfulness']}")
     print(f"    -> Score > 0.8 = good, the LLM is not hallucinating")
     print()
-    print(f"  Answer Relevancy:   {scores['answer_relevancy']}")
-    print(f"    -> Does the answer actually address the question?")
+    print(f"  Answer Relevancy:      {scores['answer_relevancy']}")
     print(f"    -> Score > 0.75 = good, answers are on-topic")
-    print(f"{'='*60}\n")
+    print()
+    print(f"  Factual Correctness:   {scores['factual_correctness']}")
+    print(f"    -> Score > 0.7 = good, answers match the reference")
+    print(f"{'='*60}")
 
-    # Save summary results
-    output_path = Path(__file__).parent / "eval_results.json"
-    with open(output_path, "w") as f:
-        json.dump(scores, f, indent=2)
-    print(f"  Results saved to: {output_path}")
-
-    # Save per-question details (with individual scores)
-    details_path = Path(__file__).parent / "eval_details.json"
-    details = []
-    for i, item in enumerate(rag_results):
-        detail = {
-            "question": item["question"],
-            "answer": item["answer"],
-            "num_contexts": len(item["contexts"]),
-            "context_preview": item["contexts"][0][:300] if item["contexts"] else "",
-        }
-        # Add per-question scores from the dataframe
-        try:
-            detail["faithfulness"] = float(result_df.iloc[i].get("faithfulness", float("nan")))
-            detail["answer_relevancy"] = float(result_df.iloc[i].get("answer_relevancy", float("nan")))
-        except Exception:
-            detail["faithfulness"] = None
-            detail["answer_relevancy"] = None
-        details.append(detail)
-
-    with open(details_path, "w") as f:
-        json.dump(details, f, indent=2)
-    print(f"  Per-question details saved to: {details_path}")
-
-    return scores
+    return scores, rag_results, df
 
 
+# ---------------------------------------------------------------------------
 # CLI
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate PodSeek RAG pipeline with RAGAS")
-    parser.add_argument(
-        "--top", type=int, default=5,
-        help="Number of chunks to retrieve per question (default: 5)",
-    )
+    parser = argparse.ArgumentParser(description="Evaluate PodSeek RAG pipeline")
+    parser.add_argument("--dataset", type=str, required=True,
+                        help="Path to dataset.json with ground-truth chunks")
+    parser.add_argument("--top", type=int, default=5,
+                        help="Top-K chunks to retrieve per question (default: 5)")
+    parser.add_argument("--skip-ragas", action="store_true",
+                        help="Only run retrieval metrics, skip RAGAS (faster, no API key needed)")
+    parser.add_argument("--output", type=str, default="eval_results.json",
+                        help="Output results JSON path")
     args = parser.parse_args()
 
-    if len(EVAL_QUESTIONS) < 3:
-        print("WARNING: Add more questions to EVAL_QUESTIONS for meaningful results.\n")
+    dataset_path = Path(args.dataset)
+    if not dataset_path.exists():
+        sys.exit(f"Dataset not found: {dataset_path}")
 
-    # Connect to Elasticsearch
-    es = Elasticsearch(ES_HOST)
+    es = Elasticsearch(ES_HOST, request_timeout=120)
     if not es.ping():
         sys.exit("Cannot connect to Elasticsearch. Is Docker running?")
     print(f"Connected to Elasticsearch at {ES_HOST}")
 
-    # Connect to Groq LLM
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        sys.exit("GROQ_API_KEY not found in environment. Check your .env file.")
+    cases = load_dataset(dataset_path)
+    if not cases:
+        sys.exit("No evaluation cases found in dataset.")
 
-    llm = ChatGroq(
-        temperature=0,
-        groq_api_key=api_key.strip(),
-        model_name="llama-3.1-8b-instant",
-    )
+    # --- Retrieval evaluation ---
+    retrieval_results = run_retrieval_eval(es, cases, top_k=args.top)
+    retrieval_scores = print_retrieval_summary(retrieval_results, top_k=args.top)
 
-    # Run evaluation
-    run_evaluation(es, llm, EVAL_QUESTIONS, top_k=args.top)
+    output = {
+        "config": {"top_k": args.top, "n_cases": len(cases)},
+        "retrieval": retrieval_scores,
+        "per_question": [
+            {
+                "title": r.get("title", ""),
+                "question": r["question"],
+                "rr": r["rr"],
+                "hit@1": r["hit@1"],
+                "hit@3": r["hit@3"],
+                "context_recall": r["context_recall"],
+                "correct_ranks": r["correct_ranks"],
+            }
+            for r in retrieval_results
+        ],
+        "ragas": None,
+    }
+
+    # --- RAGAS evaluation ---
+    if not args.skip_ragas:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            print("\nWARNING: GROQ_API_KEY not found -- skipping RAGAS.")
+        else:
+            llm = ChatGroq(
+                temperature=0,
+                groq_api_key=api_key.strip(),
+                model_name="llama-3.1-8b-instant",
+            )
+            ragas_scores, rag_results, ragas_df = run_ragas_eval(
+                llm, cases, top_k=args.top, es=es,
+            )
+            output["ragas"] = ragas_scores
+
+            for i, pq in enumerate(output["per_question"]):
+                try:
+                    pq["faithfulness"] = float(ragas_df.iloc[i].get("faithfulness", float("nan")))
+                    pq["answer_relevancy"] = float(ragas_df.iloc[i].get("answer_relevancy", float("nan")))
+                    if "factual_correctness" in ragas_df.columns:
+                        pq["factual_correctness"] = float(ragas_df.iloc[i]["factual_correctness"])
+                    pq["generated_answer"] = rag_results[i]["answer"]
+                except Exception:
+                    pass
+
+    # --- Save results ---
+    out_path = Path(__file__).parent / args.output
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+    print(f"\nResults saved to: {out_path}")
+
+    # --- Final summary ---
+    print(f"\n{'='*60}")
+    print(f"  FINAL SUMMARY")
+    print(f"{'='*60}")
+    if retrieval_scores:
+        print(f"  MRR:               {retrieval_scores['mrr']:.4f}")
+        print(f"  Hit@1:             {retrieval_scores['hit_at_1']:.4f}")
+        print(f"  Hit@3:             {retrieval_scores['hit_at_3']:.4f}")
+        print(f"  Context Recall:    {retrieval_scores['context_recall']:.4f}")
+    if output["ragas"]:
+        print(f"  Faithfulness:      {output['ragas']['faithfulness']:.4f}")
+        print(f"  Ans. Relevancy:    {output['ragas']['answer_relevancy']:.4f}")
+        print(f"  Factual Correct.:  {output['ragas'].get('factual_correctness', float('nan')):.4f}")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":

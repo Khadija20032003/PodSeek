@@ -293,7 +293,7 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
     args = parser.parse_args()
 
-    es = Elasticsearch(ES_HOST)
+    es = Elasticsearch(ES_HOST, request_timeout=120)
     if not es.ping():
         sys.exit(f"Cannot connect to Elasticsearch at {ES_HOST}")
 
