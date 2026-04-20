@@ -43,5 +43,8 @@ __pycache__/
 /cleaned_output/
 /enriched_metadata/
 
+/data/ground_truth/*
+.env.local
+
 # Embeddings (too large for git)
 elastic_ready_with_embeddings.jsonl
