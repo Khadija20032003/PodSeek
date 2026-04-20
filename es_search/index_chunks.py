@@ -130,7 +130,7 @@ def main():
     parser.add_argument("--recreate", action="store_true", help="Drop and recreate the index")
     args = parser.parse_args()
 
-    es = Elasticsearch(ES_HOST)
+    es = Elasticsearch(ES_HOST, timeout=120, max_retries=3, retry_on_timeout=True)
     if not es.ping():
         sys.exit(f"Cannot connect to Elasticsearch at {ES_HOST}")
     print(f"Connected to Elasticsearch at {ES_HOST}")

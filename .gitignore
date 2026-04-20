@@ -48,3 +48,6 @@ __pycache__/
 
 # Embeddings (too large for git)
 elastic_ready_with_embeddings.jsonl
+
+# Evaluation outputs
+es_eval/*.json
