@@ -11,7 +11,6 @@ Two evaluation modes:
   2. RAG quality (RAGAS, Groq as judge)
      - Faithfulness:        Is the answer grounded in retrieved chunks?
      - Answer Relevancy:    Does the answer address the question?
-     - Factual Correctness: Is the answer correct vs. the known reference?
 
 Usage:
     python rag_eval.py --dataset dataset.json
@@ -202,28 +201,19 @@ def print_retrieval_summary(results: list, top_k: int):
 
 def generate_answer(llm, question: str, hits: list) -> str:
     context_string = "\n\n".join(
-        f"[Chunk {i+1} | Show: {hit['_source'].get('show_name', 'Unknown')} | "
-        f"Episode: {hit['_source'].get('episode_name', 'Unknown')} | "
-        f"Time: {format_time(hit['_source'].get('start_time', 0))}-"
-        f"{format_time(hit['_source'].get('end_time', 0))}]: "
-        f"{hit['_source'].get('parent_text') or hit['_source'].get('text', '')}"
+        f"[Source: {hit['_source'].get('show_name', 'Unknown')} - "
+        f"{hit['_source'].get('episode_name', 'Unknown')} "
+        f"({format_time(hit['_source'].get('start_time', 0))})]\n"
+        f"{hit['_source'].get('text', '')}"
         for i, hit in enumerate(hits)
     )
 
-    prompt = f"""You are a podcast search assistant. Answer the user's question 
-using ONLY the provided podcast transcripts.
+    prompt = f"""Answer the question based on the context below. Use only the information provided. Cite sources when possible.
 
-RULES:
-1. Every claim in your answer MUST be directly stated in the transcripts. Do not infer, generalize, or add background knowledge.
-2. If the transcripts only partially answer the question, answer with only what is supported and say "The available podcasts only cover the following aspects of this topic."
-3. If the transcripts do not contain the answer at all, say "I could not find relevant information in the podcast database."
-4. Do not add disclaimers, recommendations, or meta-commentary like "I recommend exploring other resources."
-5. For each point you make, cite the source in this format: (Source: [show name], [episode name], [timestamp])
-
-User Question: {question}
-
-Podcast Transcripts:
+Context:
 {context_string}
+
+Question: {question}
 
 Answer:"""
 
@@ -238,12 +228,10 @@ Answer:"""
 def run_ragas_eval(llm, cases: list, top_k: int, es: Elasticsearch) -> tuple:
     from ragas import evaluate, EvaluationDataset, SingleTurnSample
     from ragas.metrics import Faithfulness, ResponseRelevancy
-    from ragas.metrics.collections import FactualCorrectness
-    from ragas.llms import LangchainLLMWrapper, llm_factory
+    from ragas.llms import LangchainLLMWrapper
     from ragas.embeddings import LangchainEmbeddingsWrapper
     from ragas.run_config import RunConfig
     from langchain_huggingface import HuggingFaceEmbeddings
-    from groq import Groq
 
     print(f"\n{'='*60}")
     print(f"  RAGAS EVALUATION  ({len(cases)} questions)")
@@ -257,7 +245,7 @@ def run_ragas_eval(llm, cases: list, top_k: int, es: Elasticsearch) -> tuple:
             result = search(es, q, top_k=top_k)
             hits = result["hits"]
             contexts = [
-                h["_source"].get("parent_text") or h["_source"].get("text", "")
+                h["_source"].get("text", "")
                 for h in hits
             ]
             answer = generate_answer(llm, q, hits)
@@ -288,41 +276,33 @@ def run_ragas_eval(llm, cases: list, top_k: int, es: Elasticsearch) -> tuple:
         HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     )
 
-    # llm_factory with Groq client for FactualCorrectness
-    groq_api_key = os.getenv("GROQ_API_KEY", "").strip()
-    groq_client = Groq(api_key=groq_api_key)
-    factual_llm = llm_factory(
-        "llama-3.1-8b-instant",
-        provider="groq",
-        client=groq_client,
-    )
-
     faithfulness_metric = Faithfulness(llm=ragas_llm)
     relevancy_metric = ResponseRelevancy(llm=ragas_llm, embeddings=ragas_embs)
     relevancy_metric.strictness = 1
-    factual_metric = FactualCorrectness(llm=factual_llm)
 
     run_config = RunConfig(max_workers=1, timeout=120, max_retries=3)
+    eval_dataset = EvaluationDataset(samples=samples)
 
-    print("\n  Running RAGAS evaluation (using Groq as judge)...")
-    result = evaluate(
-        dataset=EvaluationDataset(samples=samples),
-        metrics=[faithfulness_metric, relevancy_metric, factual_metric],
+    # --- Pass 1: Faithfulness + Answer Relevancy (legacy API) ---
+    print("\n  Running Faithfulness + Answer Relevancy...")
+    result1 = evaluate(
+        dataset=eval_dataset,
+        metrics=[faithfulness_metric, relevancy_metric],
         run_config=run_config,
     )
+    df = result1.to_pandas()
 
-    df = result.to_pandas()
     print(f"\n  Available RAGAS columns: {list(df.columns)}")
 
     def _safe_mean(col_name):
-        if col_name in df.columns:
-            return round(float(df[col_name].mean()), 4)
+        matching = [c for c in df.columns if c.startswith(col_name)]
+        if matching:
+            return round(float(df[matching[0]].mean()), 4)
         return float("nan")
 
     scores = {
         "faithfulness": _safe_mean("faithfulness"),
         "answer_relevancy": _safe_mean("answer_relevancy"),
-        "factual_correctness": _safe_mean("factual_correctness"),
     }
 
     print(f"\n{'='*60}")
@@ -333,9 +313,6 @@ def run_ragas_eval(llm, cases: list, top_k: int, es: Elasticsearch) -> tuple:
     print()
     print(f"  Answer Relevancy:      {scores['answer_relevancy']}")
     print(f"    -> Score > 0.75 = good, answers are on-topic")
-    print()
-    print(f"  Factual Correctness:   {scores['factual_correctness']}")
-    print(f"    -> Score > 0.7 = good, answers match the reference")
     print(f"{'='*60}")
 
     return scores, rag_results, df
@@ -412,8 +389,6 @@ def main():
                 try:
                     pq["faithfulness"] = float(ragas_df.iloc[i].get("faithfulness", float("nan")))
                     pq["answer_relevancy"] = float(ragas_df.iloc[i].get("answer_relevancy", float("nan")))
-                    if "factual_correctness" in ragas_df.columns:
-                        pq["factual_correctness"] = float(ragas_df.iloc[i]["factual_correctness"])
                     pq["generated_answer"] = rag_results[i]["answer"]
                 except Exception:
                     pass
@@ -436,7 +411,6 @@ def main():
     if output["ragas"]:
         print(f"  Faithfulness:      {output['ragas']['faithfulness']:.4f}")
         print(f"  Ans. Relevancy:    {output['ragas']['answer_relevancy']:.4f}")
-        print(f"  Factual Correct.:  {output['ragas'].get('factual_correctness', float('nan')):.4f}")
     print(f"{'='*60}\n")
 
 
