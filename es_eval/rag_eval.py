@@ -322,9 +322,13 @@ def run_ragas_eval(llm, cases: list, top_k: int, es: Elasticsearch) -> tuple:
 # CLI
 # ---------------------------------------------------------------------------
 
+GROUND_TRUTH_DIR = Path(__file__).resolve().parent.parent / "data" / "ground_truth"
+DEFAULT_DATASET = GROUND_TRUTH_DIR / "dataset_with_embedding.json"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate PodSeek RAG pipeline")
-    parser.add_argument("--dataset", type=str, required=True,
+    parser.add_argument("--dataset", type=str, default=str(DEFAULT_DATASET),
                         help="Path to dataset.json with ground-truth chunks")
     parser.add_argument("--top", type=int, default=5,
                         help="Top-K chunks to retrieve per question (default: 5)")
@@ -379,6 +383,7 @@ def main():
                 temperature=0,
                 groq_api_key=api_key.strip(),
                 model_name="llama-3.1-8b-instant",
+                max_tokens=2048,
             )
             ragas_scores, rag_results, ragas_df = run_ragas_eval(
                 llm, cases, top_k=args.top, es=es,
@@ -393,11 +398,49 @@ def main():
                 except Exception:
                     pass
 
-    # --- Save results ---
+    # --- Save summary results ---
     out_path = Path(__file__).parent / args.output
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
     print(f"\nResults saved to: {out_path}")
+
+    # --- Save per-question details ---
+    details_path = Path(__file__).parent / "eval_details.json"
+    details = []
+    for i, r in enumerate(retrieval_results):
+        detail = {
+            "title": r.get("title", ""),
+            "question": r["question"],
+            "rr": r["rr"],
+            "hit@1": r["hit@1"],
+            "hit@3": r["hit@3"],
+            "context_recall": r["context_recall"],
+            "correct_ranks": r["correct_ranks"],
+            "retrieved_shows": [
+                {
+                    "rank": rank,
+                    "show_name": h["_source"].get("show_name", ""),
+                    "episode_name": h["_source"].get("episode_name", ""),
+                    "score": h.get("_score", 0),
+                    "is_correct": is_correct_hit(h, r),
+                    "text_preview": h["_source"].get("text", "")[:200],
+                }
+                for rank, h in enumerate(r.get("hits", []), 1)
+            ],
+        }
+        # Add RAGAS scores if available
+        pq = output["per_question"][i] if i < len(output["per_question"]) else {}
+        if "faithfulness" in pq:
+            detail["faithfulness"] = pq["faithfulness"]
+        if "answer_relevancy" in pq:
+            detail["answer_relevancy"] = pq["answer_relevancy"]
+        if "generated_answer" in pq:
+            detail["generated_answer"] = pq["generated_answer"]
+        details.append(detail)
+
+    with open(details_path, "w", encoding="utf-8") as f:
+        json.dump(details, f, indent=2, ensure_ascii=False)
+    print(f"Details saved to: {details_path}")
 
     # --- Final summary ---
     print(f"\n{'='*60}")

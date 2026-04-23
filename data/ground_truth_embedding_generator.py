@@ -108,10 +108,22 @@ class GroundTruthEmbedder:
             processed_count += len(batch_texts)
             self._log_progress(processed_count, total_chunks, start_time)
 
-        # Save result
+        # Save result (full dataset with embeddings — used by rag_eval.py)
         logging.info(f"Saving result to: {self.output_file}")
         with open(self.output_file, "w", encoding="utf-8") as f:
             json.dump(dataset, f, indent=2)
+
+        # Also export chunks as JSONL (used by index_chunks.py)
+        jsonl_path = self.output_file.with_suffix(".jsonl")
+        chunk_count = 0
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            for item in dataset:
+                for chunk in item.get("true_chunks", []):
+                    f.write(json.dumps(chunk) + "\n")
+                    chunk_count += 1
+        logging.info(f"Saved {chunk_count} chunks to: {jsonl_path}")
+        logging.info(f"  -> Index with: python index_chunks.py --input {jsonl_path}")
+        logging.info(f"  -> Evaluate with: python rag_eval.py --dataset {self.output_file}")
 
         elapsed = round((time.time() - start_time) / 60, 2)
         logging.info(f"Finished! Processed {processed_count} chunks in {elapsed} mins.")
