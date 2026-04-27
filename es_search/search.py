@@ -61,11 +61,14 @@ def search(
     knn_k: int = 50,
     num_candidates: int = 100,
     window_size: int = 100,
+    #rank_constant: int = 60,
     rank_constant: int = 60,
     fuzziness: str | None = "AUTO",
     include_parent_text: bool = True,
-    include_category_boost: bool = True,
-    include_title_boost: bool = True,
+    #include_category_boost: bool = True,
+    include_category_boost: bool = False,
+    include_title_boost: bool = False
+    #include_title_boost: bool = True,
 ) -> dict:
     """
     Search for chunks matching the query.
@@ -88,15 +91,26 @@ def search(
         fields.append("show_name^3")
         fields.append("episode_name^3")
 
-    multi_match = {
-        "query": query,
-        "fields": fields,
-        "type": "best_fields",
-    }
-    if fuzziness is not None:
-        multi_match["fuzziness"] = fuzziness
-
-    must_clause = {"multi_match": multi_match}
+    if query.startswith('"') and query.endswith('"'):
+        clean_query = query.strip('"')
+        must_clause = {
+            "multi_match": {
+                "query": clean_query,
+                "fields": fields,
+                "type": "phrase"  # Forces an exact match
+            }
+        }
+    else:
+        multi_match = {
+            "query": query,
+            "fields": fields,
+            "type": "best_fields",
+            "operator": "and"  # Forces ALL words to be present
+        }
+        if fuzziness is not None:
+            multi_match["fuzziness"] = fuzziness
+            
+        must_clause = {"multi_match": multi_match}
 
     t_total0 = time.perf_counter()
 
