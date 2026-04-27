@@ -61,14 +61,11 @@ def search(
     knn_k: int = 50,
     num_candidates: int = 100,
     window_size: int = 100,
-    #rank_constant: int = 60,
     rank_constant: int = 60,
     fuzziness: str | None = "AUTO",
     include_parent_text: bool = True,
-    #include_category_boost: bool = True,
     include_category_boost: bool = False,
     include_title_boost: bool = False
-    #include_title_boost: bool = True,
 ) -> dict:
     """
     Search for chunks matching the query.
