@@ -8,7 +8,6 @@ A RAG-powered search engine over the Spotify podcast transcript dataset. Combine
 PodSeek/
 ├── config.py                          # Central configuration (all paths, settings)
 ├── requirements.txt                   # Python dependencies
-├── .env                               # API keys (not in git — see setup below)
 ├── data/                              # Data preprocessing pipeline
 │   ├── transcript_extractor.py        # Raw JSON → cleaned segments + grouped episodes
 │   ├── podcast_creator.py             # Grouped episodes → full transcripts + segment files
@@ -22,10 +21,13 @@ PodSeek/
 │   ├── index_chunks.py                # Bulk-indexes chunks into Elasticsearch
 │   └── search.py                      # CLI search with BM25
 ├── es_eval/                           # Evaluation scripts
+│   ├── rag_eval.py                    # RAGAS evaluation (faithfulness + relevancy)
+│   └── .env.example                   # Groq API key for LLM judges
 ├── streamlit_app/                     # Frontend + LLM answer generation
 │   ├── streamlit_app.py               # Streamlit UI with RAG pipeline
 │   ├── requirements.txt               # Streamlit-specific dependencies
-│   └── .env.example                   # Example environment file
+│   ├── .env.example                   # Example environment file
+│   └── .env                           # Groq API key (not in git — see step 4)
 ├── benchmark_latency.py               # Latency benchmarking
 ├── .gitignore
 └── README.md
@@ -103,9 +105,17 @@ The app uses Groq to access the Llama 3 model for answer generation.
 1. Go to [console.groq.com](https://console.groq.com) and sign up for a free account.
 2. Go to the **API Keys** tab and generate a new key.
 3. **Important:** After generating your key, go to the **Playground** tab, select the `llama-3.1-8b-instant` model, and send a message. This activates the key.
-4. Create a `.env` file in the project root:
+4. Create a `.env` file in `streamlit_app/`:
 
 ```bash
+# streamlit_app/.env
+GROQ_API_KEY=your_key_here
+```
+
+5. Do the same for `es_eval/` (needed to run RAG evaluation):
+
+```bash
+# es_eval/.env
 GROQ_API_KEY=your_key_here
 ```
 
@@ -115,7 +125,18 @@ GROQ_API_KEY=your_key_here
 streamlit run streamlit_app/streamlit_app.py
 ```
 
-### 6. CLI search (optional)
+### 6. Run evaluation (optional)
+
+The RAG evaluation uses RAGAS with Groq-hosted LLMs as judges to measure faithfulness and answer relevancy:
+
+```bash
+cd es_eval
+python rag_eval.py
+```
+
+Make sure Elasticsearch is running and the `.env` file with your Groq key is in the `es_eval/` folder.
+
+### 7. CLI search (optional)
 
 You can also search directly from the command line without the Streamlit UI:
 
@@ -129,7 +150,7 @@ python search.py "climate change" --top 20
 python search.py "carbonara" --json
 ```
 
-### 7. Kibana (optional)
+### 8. Kibana (optional)
 
 Open [http://localhost:5601](http://localhost:5601) and go to **Dev Tools**:
 
