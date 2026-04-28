@@ -1,6 +1,6 @@
 # PodSeek — Podcast Transcript Search Engine
 
-A search engine over the Spotify podcast transcript dataset. Uses Elasticsearch with BM25 keyword search over ~937k chunked podcast transcript segments.
+A RAG-powered search engine over the Spotify podcast transcript dataset. Combines Elasticsearch with BM25 keyword search and kNN semantic search over ~937k chunked podcast transcript segments, with LLM-powered answer generation via Groq (Llama 3).
 
 ## Project Structure
 
@@ -8,6 +8,7 @@ A search engine over the Spotify podcast transcript dataset. Uses Elasticsearch 
 PodSeek/
 ├── config.py                          # Central configuration (all paths, settings)
 ├── requirements.txt                   # Python dependencies
+├── .env                               # API keys (not in git — see setup below)
 ├── data/                              # Data preprocessing pipeline
 │   ├── transcript_extractor.py        # Raw JSON → cleaned segments + grouped episodes
 │   ├── podcast_creator.py             # Grouped episodes → full transcripts + segment files
@@ -15,12 +16,18 @@ PodSeek/
 │   ├── rss_enrichment.py              # Scrapes RSS feeds for categories + metadata
 │   ├── elastic_data_creator.py        # Merges chunks + metadata → elastic_ready.jsonl
 │   ├── embedding_generator.py         # Adds dense vectors → elastic_ready_with_embeddings.jsonl
-│   ├── PodcastMetadata.py             # Pydantic metadata model (deprecated)
 │   └── podcasts-no-audio-13GB/        # Raw Spotify dataset (not in git)
 ├── es_search/                         # Elasticsearch indexing + search
 │   ├── docker-compose.yml             # Elasticsearch + Kibana containers
 │   ├── index_chunks.py                # Bulk-indexes chunks into Elasticsearch
 │   └── search.py                      # CLI search with BM25
+├── es_eval/                           # Evaluation scripts
+├── streamlit_app/                     # Frontend + LLM answer generation
+│   ├── streamlit_app.py               # Streamlit UI with RAG pipeline
+│   ├── requirements.txt               # Streamlit-specific dependencies
+│   └── .env.example                   # Example environment file
+├── benchmark_latency.py               # Latency benchmarking
+├── .gitignore
 └── README.md
 ```
 
@@ -29,30 +36,33 @@ PodSeek/
 - Python 3.10+
 - Docker & Docker Compose
 - The Spotify podcast transcript dataset (`podcasts-no-audio-13GB/`)
+- A Groq API key (free — see step 4 below)
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Set up the environment
 
 ```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
+pip install -r streamlit_app/requirements.txt
 ```
 
 ### 2. Run the data pipeline
 
-From the `data/` directory:
+You can run each stage individually or all at once with `python data/pipeline.py`.
 
 ```bash
 cd data
 
-# Step 1: Extract transcript segments and group them by episode
+# Step 1: Extract transcript segments and group by episode
 python transcript_extractor.py
 
 # Step 2: Build full transcripts and segment files
 python podcast_creator.py
 
 # Step 3: Chunk segments with hierarchical parent/child chunking
-# Output: one JSON per line in PREPROCESSING_FILES/chunked_podcast_segments/*_chunked.jsonl
 python transcript_segmenter.py
 
 # Step 4: Enrich metadata via RSS feeds (optional, takes a while)
@@ -61,69 +71,67 @@ python rss_enrichment.py
 # Step 5: Merge chunks + metadata into final index file
 python elastic_data_creator.py
 
-# Step 6 (optional but recommended): Generate embeddings for vector search
-# Note: A small .progress sidecar file is written next to the output JSONL to support resuming.
+# Step 6: Generate embeddings for vector search
 python embedding_generator.py
 ```
 
-NOTE: you can download the generated embeddings from this link
-https://drive.google.com/drive/folders/1e-xhHxDCSd7QM_QfIU5SBLG_kLXbdyZC?usp=sharing
+**Alternatively**, you can download pre-generated embeddings from [this Google Drive folder](https://drive.google.com/drive/folders/1e-xhHxDCSd7QM_QfIU5SBLG_kLXbdyZC?usp=sharing). Download both `elastic_ready_with_embeddings.jsonl` and `elastic_ready_with_embeddings.jsonl.progress`, and place them in `data/final_output/`.
 
-you will need to download elastic_ready_with_embeddings.jsonl
-and elastic_ready_with_embeddings.jsonl.progress,
-and upload them both onto the data/final_output folder
-
-
-
-Alternatively, you can run the full preprocessing pipeline in one go:
-
-```bash
-cd data
-python pipeline.py
-```
-
-### 3. Start Elasticsearch
+### 3. Start Elasticsearch and index the data
 
 ```bash
 cd es_search
 docker compose up -d
 ```
 
-Verify it's running (wait ~30 seconds for startup):
+Wait ~30 seconds for startup, then verify:
 
 ```bash
 curl http://localhost:9200
 ```
 
-### 4. Index the data
+Index the chunks:
 
 ```bash
-cd es_search
 python index_chunks.py --recreate
 ```
 
-### 5. Search
+### 4. Set up the Groq API key
+
+The app uses Groq to access the Llama 3 model for answer generation.
+
+1. Go to [console.groq.com](https://console.groq.com) and sign up for a free account.
+2. Go to the **API Keys** tab and generate a new key.
+3. **Important:** After generating your key, go to the **Playground** tab, select the `llama-3.1-8b-instant` model, and send a message. This activates the key.
+4. Create a `.env` file in the project root:
+
+```bash
+GROQ_API_KEY=your_key_here
+```
+
+### 5. Run the application
+
+```bash
+streamlit run streamlit_app/streamlit_app.py
+```
+
+### 6. CLI search (optional)
+
+You can also search directly from the command line without the Streamlit UI:
 
 ```bash
 cd es_search
 
-# BM25 keyword search
 python search.py "large language models"
-
-# Filter by category or show
 python search.py "recipe" --category Food
 python search.py "neural networks" --show "The AI Podcast"
-
-# More results
 python search.py "climate change" --top 20
-
-# Raw JSON output
 python search.py "carbonara" --json
 ```
 
-### 6. Kibana
+### 7. Kibana (optional)
 
-Open http://localhost:5601 in your browser. Go to **Dev Tools** and run:
+Open [http://localhost:5601](http://localhost:5601) and go to **Dev Tools**:
 
 ```
 GET podcast_chunks/_search
@@ -138,37 +146,30 @@ GET podcast_chunks/_search
 
 ## Elasticsearch Index Schema
 
-| Field        | Type         | Purpose                                 |
-| ------------ | ------------ | --------------------------------------- |
-| file_id      | keyword      | Episode identifier                      |
-| chunk_id     | keyword      | Unique child chunk id (parent+child)    |
-| text         | text         | Child chunk text (embedded + searched)  |
-| start_time   | float        | Chunk start in audio (seconds)          |
-| end_time     | float        | Chunk end in audio (seconds)            |
-| parent_id    | keyword      | Parent chunk id (120s window)           |
-| parent_text  | text         | Parent text returned to the LLM         |
-| parent_start_time | float   | Parent start in audio (seconds)         |
-| parent_end_time   | float   | Parent end in audio (seconds)           |
-| show_name    | text/keyword | Podcast show name (searchable + filter) |
-| episode_name | text/keyword | Episode title (searchable + filter)     |
-| publisher    | text/keyword | Publisher name                          |
-| category     | keyword      | Show category (e.g. Technology, Food)   |
-| rss_link     | keyword      | RSS feed URL                            |
+| Field | Type | Purpose |
+|---|---|---|
+| file_id | keyword | Episode identifier |
+| chunk_id | keyword | Unique child chunk id |
+| text | text | Child chunk text (embedded + searched) |
+| start_time / end_time | float | Chunk boundaries in audio (seconds) |
+| embedding | dense_vector (384) | Sentence-transformer vector for kNN search |
+| parent_id | keyword | Parent chunk id (120s window) |
+| parent_text | text | Parent context returned to the LLM |
+| parent_start_time / parent_end_time | float | Parent boundaries in audio (seconds) |
+| show_name | text/keyword | Podcast show name (searchable + filterable) |
+| episode_name | text/keyword | Episode title |
+| publisher | text/keyword | Publisher name |
+| category | keyword | Show category (e.g. Technology, Food) |
+| rss_link | keyword | RSS feed URL |
 
 ## Configuration
 
-All paths and settings are defined in `config.py` at the project root. Edit this file to change dataset locations, chunk parameters, or Elasticsearch host.
-
-The transcript extraction step scans `TRANSCRIPTS_JSON_DIR` (defaults to `data/podcasts-no-audio-13GB/podcasts-transcripts-6to7`) so you can iterate on a smaller subset without touching the TSV metadata path.
+All paths and settings are in `config.py`. Edit this file to change dataset locations, chunk parameters (parent/child window sizes), or the Elasticsearch host.
 
 ## Stopping Elasticsearch
 
 ```bash
 cd es_search
-
-# Stop containers (keeps indexed data)
-docker compose down
-
-# Stop and delete all indexed data
-docker compose down -v
+docker compose down       # Stop containers (keeps indexed data)
+docker compose down -v    # Stop and delete all indexed data
 ```
